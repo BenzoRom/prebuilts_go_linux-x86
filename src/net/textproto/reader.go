@@ -11,6 +11,7 @@ import (
 	"io/ioutil"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // A Reader implements convenience methods for reading requests
@@ -27,6 +28,7 @@ type Reader struct {
 // should be reading from an io.LimitReader or similar Reader to bound
 // the size of responses.
 func NewReader(r *bufio.Reader) *Reader {
+	commonHeaderOnce.Do(initCommonHeader)
 	return &Reader{R: r}
 }
 
@@ -493,18 +495,12 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 			return m, err
 		}
 
-		// Key ends at first colon; should not have trailing spaces
-		// but they appear in the wild, violating specs, so we remove
-		// them if present.
+		// Key ends at first colon.
 		i := bytes.IndexByte(kv, ':')
 		if i < 0 {
 			return m, ProtocolError("malformed MIME header line: " + string(kv))
 		}
-		endKey := i
-		for endKey > 0 && kv[endKey-1] == ' ' {
-			endKey--
-		}
-		key := canonicalMIMEHeaderKey(kv[:endKey])
+		key := canonicalMIMEHeaderKey(kv[:i])
 
 		// As per RFC 7230 field-name is a token, tokens consist of one or more chars.
 		// We could return a ProtocolError here, but better to be liberal in what we
@@ -571,6 +567,8 @@ func (r *Reader) upcomingHeaderNewlines() (n int) {
 // If s contains a space or invalid header field bytes, it is
 // returned without modifications.
 func CanonicalMIMEHeaderKey(s string) string {
+	commonHeaderOnce.Do(initCommonHeader)
+
 	// Quick check for canonical encoding.
 	upper := true
 	for i := 0; i < len(s); i++ {
@@ -642,9 +640,12 @@ func canonicalMIMEHeaderKey(a []byte) string {
 }
 
 // commonHeader interns common header strings.
-var commonHeader = make(map[string]string)
+var commonHeader map[string]string
 
-func init() {
+var commonHeaderOnce sync.Once
+
+func initCommonHeader() {
+	commonHeader = make(map[string]string)
 	for _, v := range []string{
 		"Accept",
 		"Accept-Charset",
