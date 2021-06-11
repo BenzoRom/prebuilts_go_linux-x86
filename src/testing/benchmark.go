@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"internal/race"
+	"internal/sysinfo"
 	"io"
 	"math"
 	"os"
@@ -69,8 +70,8 @@ var benchmarkLock sync.Mutex
 // Used for every benchmark for measuring memory.
 var memStats runtime.MemStats
 
-// An internal type but exported because it is cross-package; part of the implementation
-// of the "go test" command.
+// InternalBenchmark is an internal type but exported because it is cross-package;
+// it is part of the implementation of the "go test" command.
 type InternalBenchmark struct {
 	Name string
 	F    func(b *B)
@@ -86,7 +87,7 @@ type InternalBenchmark struct {
 // may be called simultaneously from multiple goroutines.
 //
 // Like in tests, benchmark logs are accumulated during execution
-// and dumped to standard error when done. Unlike in tests, benchmark logs
+// and dumped to standard output when done. Unlike in tests, benchmark logs
 // are always printed, so as not to hide output whose existence may be
 // affecting benchmark results.
 type B struct {
@@ -179,6 +180,7 @@ func (b *B) ReportAllocs() {
 func (b *B) runN(n int) {
 	benchmarkLock.Lock()
 	defer benchmarkLock.Unlock()
+	defer b.runCleanup(normalPanic)
 	// Try to get a comparable environment for each run
 	// by clearing garbage from previous runs.
 	runtime.GC()
@@ -241,7 +243,7 @@ func (b *B) run1() bool {
 		if b.skipped {
 			tag = "SKIP"
 		}
-		if b.chatty && (len(b.output) > 0 || b.finished) {
+		if b.chatty != nil && (len(b.output) > 0 || b.finished) {
 			b.trimOutput()
 			fmt.Fprintf(b.w, "--- %s: %s\n%s", tag, b.name, b.output)
 		}
@@ -260,6 +262,9 @@ func (b *B) run() {
 		fmt.Fprintf(b.w, "goarch: %s\n", runtime.GOARCH)
 		if b.importPath != "" {
 			fmt.Fprintf(b.w, "pkg: %s\n", b.importPath)
+		}
+		if cpu := sysinfo.CPU.Name(); cpu != "" {
+			fmt.Fprintf(b.w, "cpu: %s\n", cpu)
 		}
 	})
 	if b.context != nil {
@@ -342,7 +347,7 @@ func (b *B) ReportMetric(n float64, unit string) {
 	b.extra[unit] = n
 }
 
-// The results of a benchmark run.
+// BenchmarkResult contains the results of a benchmark run.
 type BenchmarkResult struct {
 	N         int           // The number of iterations.
 	T         time.Duration // The total time taken.
@@ -446,23 +451,27 @@ func (r BenchmarkResult) String() string {
 
 func prettyPrint(w io.Writer, x float64, unit string) {
 	// Print all numbers with 10 places before the decimal point
-	// and small numbers with three sig figs.
+	// and small numbers with four sig figs. Field widths are
+	// chosen to fit the whole part in 10 places while aligning
+	// the decimal point of all fractional formats.
 	var format string
 	switch y := math.Abs(x); {
-	case y == 0 || y >= 99.95:
+	case y == 0 || y >= 999.95:
 		format = "%10.0f %s"
-	case y >= 9.995:
+	case y >= 99.995:
 		format = "%12.1f %s"
-	case y >= 0.9995:
+	case y >= 9.9995:
 		format = "%13.2f %s"
-	case y >= 0.09995:
+	case y >= 0.99995:
 		format = "%14.3f %s"
-	case y >= 0.009995:
+	case y >= 0.099995:
 		format = "%15.4f %s"
-	case y >= 0.0009995:
+	case y >= 0.0099995:
 		format = "%16.5f %s"
-	default:
+	case y >= 0.00099995:
 		format = "%17.6f %s"
+	default:
+		format = "%18.7f %s"
 	}
 	fmt.Fprintf(w, format, x, unit)
 }
@@ -488,8 +497,8 @@ type benchContext struct {
 	extLen int // Maximum extension length.
 }
 
-// An internal function but exported because it is cross-package; part of the implementation
-// of the "go test" command.
+// RunBenchmarks is an internal function but exported because it is cross-package;
+// it is part of the implementation of the "go test" command.
 func RunBenchmarks(matchString func(pat, str string) (bool, error), benchmarks []InternalBenchmark) {
 	runBenchmarks("", matchString, benchmarks)
 }
@@ -522,9 +531,9 @@ func runBenchmarks(importPath string, matchString func(pat, str string) (bool, e
 	}
 	main := &B{
 		common: common{
-			name:   "Main",
-			w:      os.Stdout,
-			chatty: *chatty,
+			name:  "Main",
+			w:     os.Stdout,
+			bench: true,
 		},
 		importPath: importPath,
 		benchFunc: func(b *B) {
@@ -534,6 +543,9 @@ func runBenchmarks(importPath string, matchString func(pat, str string) (bool, e
 		},
 		benchTime: benchTime,
 		context:   ctx,
+	}
+	if Verbose() {
+		main.chatty = newChattyPrinter(main.w)
 	}
 	main.runN(1)
 	return !main.failed
@@ -545,7 +557,11 @@ func (ctx *benchContext) processBench(b *B) {
 		for j := uint(0); j < *count; j++ {
 			runtime.GOMAXPROCS(procs)
 			benchName := benchmarkName(b.name, procs)
-			fmt.Fprintf(b.w, "%-*s\t", ctx.maxLen, benchName)
+
+			// If it's chatty, we've already printed this information.
+			if b.chatty == nil {
+				fmt.Fprintf(b.w, "%-*s\t", ctx.maxLen, benchName)
+			}
 			// Recompute the running time for all but the first iteration.
 			if i > 0 || j > 0 {
 				b = &B{
@@ -554,6 +570,7 @@ func (ctx *benchContext) processBench(b *B) {
 						name:   b.name,
 						w:      b.w,
 						chatty: b.chatty,
+						bench:  true,
 					},
 					benchFunc: b.benchFunc,
 					benchTime: b.benchTime,
@@ -569,6 +586,9 @@ func (ctx *benchContext) processBench(b *B) {
 				continue
 			}
 			results := r.String()
+			if b.chatty != nil {
+				fmt.Fprintf(b.w, "%-*s\t", ctx.maxLen, benchName)
+			}
 			if *benchmarkMemory || b.showAllocResult {
 				results += "\t" + r.MemString()
 			}
@@ -616,6 +636,7 @@ func (b *B) Run(name string, f func(b *B)) bool {
 			creator: pc[:n],
 			w:       b.w,
 			chatty:  b.chatty,
+			bench:   true,
 		},
 		importPath: b.importPath,
 		benchFunc:  f,
@@ -627,6 +648,22 @@ func (b *B) Run(name string, f func(b *B)) bool {
 		// Only process sub-benchmarks, if any.
 		atomic.StoreInt32(&sub.hasSub, 1)
 	}
+
+	if b.chatty != nil {
+		labelsOnce.Do(func() {
+			fmt.Printf("goos: %s\n", runtime.GOOS)
+			fmt.Printf("goarch: %s\n", runtime.GOARCH)
+			if b.importPath != "" {
+				fmt.Printf("pkg: %s\n", b.importPath)
+			}
+			if cpu := sysinfo.CPU.Name(); cpu != "" {
+				fmt.Printf("cpu: %s\n", cpu)
+			}
+		})
+
+		fmt.Println(benchName)
+	}
+
 	if sub.run1() {
 		sub.run()
 	}

@@ -35,6 +35,8 @@
 //         }
 //     }
 //
+//     Fingerprint [8]byte
+//
 // uvarint means a uint64 written out using uvarint encoding.
 //
 // []T means a uvarint followed by that many T objects. In other
@@ -184,8 +186,9 @@
 //     }
 //
 //
-// Pos encodes a file:line pair, incorporating a simple delta encoding
-// scheme within a data object. See exportWriter.pos for details.
+// Pos encodes a file:line:column triple, incorporating a simple delta
+// encoding scheme within a data object. See exportWriter.pos for
+// details.
 //
 //
 // Compiler-specific details.
@@ -202,7 +205,9 @@ import (
 	"bufio"
 	"bytes"
 	"cmd/compile/internal/types"
+	"cmd/internal/goobj"
 	"cmd/internal/src"
+	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -212,8 +217,9 @@ import (
 )
 
 // Current indexed export format version. Increase with each format change.
+// 1: added column details to Pos
 // 0: Go1.11 encoding
-const iexportVersion = 0
+const iexportVersion = 1
 
 // predeclReserved is the number of type offsets reserved for types
 // implicitly declared in the universe block.
@@ -290,9 +296,16 @@ func iexport(out *bufio.Writer) {
 	hdr.uint64(dataLen)
 
 	// Flush output.
-	io.Copy(out, &hdr)
-	io.Copy(out, &p.strings)
-	io.Copy(out, &p.data0)
+	h := md5.New()
+	wr := io.MultiWriter(out, h)
+	io.Copy(wr, &hdr)
+	io.Copy(wr, &p.strings)
+	io.Copy(wr, &p.data0)
+
+	// Add fingerprint (used by linker object file).
+	// Attach this to the end, so tools (e.g. gcimporter) don't care.
+	copy(Ctxt.Fingerprint[:], h.Sum(nil)[:])
+	out.Write(Ctxt.Fingerprint[:])
 }
 
 // writeIndex writes out an object index. mainIndex indicates whether
@@ -401,10 +414,11 @@ func (p *iexporter) pushDecl(n *Node) {
 type exportWriter struct {
 	p *iexporter
 
-	data     intWriter
-	currPkg  *types.Pkg
-	prevFile string
-	prevLine int64
+	data       intWriter
+	currPkg    *types.Pkg
+	prevFile   string
+	prevLine   int64
+	prevColumn int64
 }
 
 func (p *iexporter) doDecl(n *Node) {
@@ -470,6 +484,7 @@ func (p *iexporter) doDecl(n *Node) {
 
 		t := n.Type
 		if t.IsInterface() {
+			w.typeExt(t)
 			break
 		}
 
@@ -482,6 +497,7 @@ func (p *iexporter) doDecl(n *Node) {
 			w.signature(m.Type)
 		}
 
+		w.typeExt(t)
 		for _, m := range ms.Slice() {
 			w.methExt(m)
 		}
@@ -510,29 +526,39 @@ func (w *exportWriter) pos(pos src.XPos) {
 	p := Ctxt.PosTable.Pos(pos)
 	file := p.Base().AbsFilename()
 	line := int64(p.RelLine())
+	column := int64(p.RelCol())
 
-	// When file is the same as the last position (common case),
-	// we can save a few bytes by delta encoding just the line
-	// number.
+	// Encode position relative to the last position: column
+	// delta, then line delta, then file name. We reserve the
+	// bottom bit of the column and line deltas to encode whether
+	// the remaining fields are present.
 	//
 	// Note: Because data objects may be read out of order (or not
 	// at all), we can only apply delta encoding within a single
-	// object. This is handled implicitly by tracking prevFile and
-	// prevLine as fields of exportWriter.
+	// object. This is handled implicitly by tracking prevFile,
+	// prevLine, and prevColumn as fields of exportWriter.
 
-	if file == w.prevFile {
-		delta := line - w.prevLine
-		w.int64(delta)
-		if delta == deltaNewFile {
-			w.int64(-1)
-		}
-	} else {
-		w.int64(deltaNewFile)
-		w.int64(line) // line >= 0
-		w.string(file)
-		w.prevFile = file
+	deltaColumn := (column - w.prevColumn) << 1
+	deltaLine := (line - w.prevLine) << 1
+
+	if file != w.prevFile {
+		deltaLine |= 1
 	}
+	if deltaLine != 0 {
+		deltaColumn |= 1
+	}
+
+	w.int64(deltaColumn)
+	if deltaColumn&1 != 0 {
+		w.int64(deltaLine)
+		if deltaLine&1 != 0 {
+			w.string(file)
+		}
+	}
+
+	w.prevFile = file
 	w.prevLine = line
+	w.prevColumn = column
 }
 
 func (w *exportWriter) pkg(pkg *types.Pkg) {
@@ -725,24 +751,23 @@ func (w *exportWriter) param(f *types.Field) {
 
 func constTypeOf(typ *types.Type) Ctype {
 	switch typ {
-	case types.Idealint, types.Idealrune:
+	case types.UntypedInt, types.UntypedRune:
 		return CTINT
-	case types.Idealfloat:
+	case types.UntypedFloat:
 		return CTFLT
-	case types.Idealcomplex:
+	case types.UntypedComplex:
 		return CTCPLX
 	}
 
 	switch typ.Etype {
-	case TCHAN, TFUNC, TMAP, TNIL, TINTER, TSLICE:
+	case TCHAN, TFUNC, TMAP, TNIL, TINTER, TPTR, TSLICE, TUNSAFEPTR:
 		return CTNIL
 	case TBOOL:
 		return CTBOOL
 	case TSTRING:
 		return CTSTR
 	case TINT, TINT8, TINT16, TINT32, TINT64,
-		TUINT, TUINT8, TUINT16, TUINT32, TUINT64, TUINTPTR,
-		TPTR, TUNSAFEPTR:
+		TUINT, TUINT8, TUINT16, TUINT32, TUINT64, TUINTPTR:
 		return CTINT
 	case TFLOAT32, TFLOAT64:
 		return CTFLT
@@ -755,8 +780,8 @@ func constTypeOf(typ *types.Type) Ctype {
 }
 
 func (w *exportWriter) value(typ *types.Type, v Val) {
-	if typ.IsUntyped() {
-		typ = untype(v.Ctype())
+	if vt := idealType(v.Ctype()); typ.IsUntyped() && typ != vt {
+		Fatalf("exporter: untyped type mismatch, have: %v, want: %v", typ, vt)
 	}
 	w.typ(typ)
 
@@ -933,13 +958,15 @@ func (w *exportWriter) string(s string) { w.uint64(w.p.stringOff(s)) }
 
 func (w *exportWriter) varExt(n *Node) {
 	w.linkname(n.Sym)
+	w.symIdx(n.Sym)
 }
 
 func (w *exportWriter) funcExt(n *Node) {
 	w.linkname(n.Sym)
+	w.symIdx(n.Sym)
 
 	// Escape analysis.
-	for _, fs := range types.RecvsParams {
+	for _, fs := range &types.RecvsParams {
 		for _, f := range fs(n.Type).FieldSlice() {
 			w.string(f.Note)
 		}
@@ -973,6 +1000,33 @@ func (w *exportWriter) methExt(m *types.Field) {
 
 func (w *exportWriter) linkname(s *types.Sym) {
 	w.string(s.Linkname)
+}
+
+func (w *exportWriter) symIdx(s *types.Sym) {
+	lsym := s.Linksym()
+	if lsym.PkgIdx > goobj.PkgIdxSelf || (lsym.PkgIdx == goobj.PkgIdxInvalid && !lsym.Indexed()) || s.Linkname != "" {
+		// Don't export index for non-package symbols, linkname'd symbols,
+		// and symbols without an index. They can only be referenced by
+		// name.
+		w.int64(-1)
+	} else {
+		// For a defined symbol, export its index.
+		// For re-exporting an imported symbol, pass its index through.
+		w.int64(int64(lsym.SymIdx))
+	}
+}
+
+func (w *exportWriter) typeExt(t *types.Type) {
+	// Export whether this type is marked notinheap.
+	w.bool(t.NotInHeap())
+	// For type T, export the index of type descriptor symbols of T and *T.
+	if i, ok := typeSymIdx[t]; ok {
+		w.int64(i[0])
+		w.int64(i[1])
+		return
+	}
+	w.symIdx(typesym(t))
+	w.symIdx(typesym(t.PtrTo()))
 }
 
 // Inline bodies.
@@ -1032,11 +1086,17 @@ func (w *exportWriter) stmt(n *Node) {
 			w.expr(n.Right)
 		}
 
-	case OAS2, OAS2DOTTYPE, OAS2FUNC, OAS2MAPR, OAS2RECV:
+	case OAS2:
 		w.op(OAS2)
 		w.pos(n.Pos)
 		w.exprList(n.List)
 		w.exprList(n.Rlist)
+
+	case OAS2DOTTYPE, OAS2FUNC, OAS2MAPR, OAS2RECV:
+		w.op(OAS2)
+		w.pos(n.Pos)
+		w.exprList(n.List)
+		w.exprList(asNodes([]*Node{n.Right}))
 
 	case ORETURN:
 		w.op(ORETURN)
@@ -1078,13 +1138,10 @@ func (w *exportWriter) stmt(n *Node) {
 		w.pos(n.Pos)
 		w.stmtList(n.Ninit)
 		w.exprsOrNil(n.Left, nil)
-		w.stmtList(n.List)
+		w.caseList(n)
 
-	case OCASE, OXCASE:
-		w.op(OXCASE)
-		w.pos(n.Pos)
-		w.stmtList(n.List)
-		w.stmtList(n.Nbody)
+	// case OCASE:
+	//	handled by caseList
 
 	case OFALL:
 		w.op(OFALL)
@@ -1105,6 +1162,24 @@ func (w *exportWriter) stmt(n *Node) {
 
 	default:
 		Fatalf("exporter: CANNOT EXPORT: %v\nPlease notify gri@\n", n.Op)
+	}
+}
+
+func (w *exportWriter) caseList(sw *Node) {
+	namedTypeSwitch := sw.Op == OSWITCH && sw.Left != nil && sw.Left.Op == OTYPESW && sw.Left.Left != nil
+
+	cases := sw.List.Slice()
+	w.uint64(uint64(len(cases)))
+	for _, cas := range cases {
+		if cas.Op != OCASE {
+			Fatalf("expected OCASE, got %v", cas)
+		}
+		w.pos(cas.Pos)
+		w.stmtList(cas.List)
+		if namedTypeSwitch {
+			w.localName(cas.Rlist.First())
+		}
+		w.stmtList(cas.Nbody)
 	}
 }
 
@@ -1172,6 +1247,19 @@ func (w *exportWriter) expr(n *Node) {
 		w.op(OTYPE)
 		w.typ(n.Type)
 
+	case OTYPESW:
+		w.op(OTYPESW)
+		w.pos(n.Pos)
+		var s *types.Sym
+		if n.Left != nil {
+			if n.Left.Op != ONONAME {
+				Fatalf("expected ONONAME, got %v", n.Left)
+			}
+			s = n.Left.Sym
+		}
+		w.localIdent(s, 0) // declared pseudo-variable, if any
+		w.exprsOrNil(n.Right, nil)
+
 	// case OTARRAY, OTMAP, OTCHAN, OTSTRUCT, OTINTER, OTFUNC:
 	// 	should have been resolved by typechecking - handled by default case
 
@@ -1182,10 +1270,9 @@ func (w *exportWriter) expr(n *Node) {
 	// 	should have been resolved by typechecking - handled by default case
 
 	case OPTRLIT:
-		w.op(OPTRLIT)
+		w.op(OADDR)
 		w.pos(n.Pos)
 		w.expr(n.Left)
-		w.bool(n.Implicit())
 
 	case OSTRUCTLIT:
 		w.op(OSTRUCTLIT)
@@ -1207,8 +1294,13 @@ func (w *exportWriter) expr(n *Node) {
 	// case OSTRUCTKEY:
 	//	unreachable - handled in case OSTRUCTLIT by elemList
 
-	// case OCALLPART:
-	//	unimplemented - handled by default case
+	case OCALLPART:
+		// An OCALLPART is an OXDOT before type checking.
+		w.op(OXDOT)
+		w.pos(n.Pos)
+		w.expr(n.Left)
+		// Right node should be ONAME
+		w.selector(n.Right.Sym)
 
 	case OXDOT, ODOT, ODOTPTR, ODOTINTER, ODOTMETH:
 		w.op(OXDOT)

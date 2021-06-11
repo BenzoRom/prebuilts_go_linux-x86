@@ -43,16 +43,9 @@ func initExceptionHandler() {
 //
 //go:nosplit
 func isAbort(r *context) bool {
-	switch GOARCH {
-	case "386", "amd64":
-		// In the case of an abort, the exception IP is one byte after
-		// the INT3 (this differs from UNIX OSes).
-		return isAbortPC(r.ip() - 1)
-	case "arm":
-		return isAbortPC(r.ip())
-	default:
-		return false
-	}
+	// In the case of an abort, the exception IP is one byte after
+	// the INT3 (this differs from UNIX OSes).
+	return isAbortPC(r.ip() - 1)
 }
 
 // isgoexception reports whether this exception should be translated
@@ -129,7 +122,14 @@ func exceptionhandler(info *exceptionrecord, r *context, gp *g) int32 {
 	// make the trace look like a call to runtime·sigpanic instead.
 	// (Otherwise the trace will end at runtime·sigpanic and we
 	// won't get to see who faulted.)
-	if r.ip() != 0 {
+	// Also don't push a sigpanic frame if the faulting PC
+	// is the entry of asyncPreempt. In this case, we suspended
+	// the thread right between the fault and the exception handler
+	// starting to run, and we have pushed an asyncPreempt call.
+	// The exception is not from asyncPreempt, so not to push a
+	// sigpanic call to make it look like that. Instead, just
+	// overwrite the PC. (See issue #35773)
+	if r.ip() != 0 && r.ip() != funcPC(asyncPreempt) {
 		sp := unsafe.Pointer(r.sp())
 		sp = add(sp, ^(unsafe.Sizeof(uintptr(0)) - 1)) // sp--
 		r.set_sp(uintptr(sp))
@@ -171,6 +171,12 @@ var testingWER bool
 //
 //go:nosplit
 func lastcontinuehandler(info *exceptionrecord, r *context, gp *g) int32 {
+	if islibrary || isarchive {
+		// Go DLL/archive has been loaded in a non-go program.
+		// If the exception does not originate from go, the go runtime
+		// should not take responsibility of crashing the process.
+		return _EXCEPTION_CONTINUE_SEARCH
+	}
 	if testingWER {
 		return _EXCEPTION_CONTINUE_SEARCH
 	}
@@ -229,8 +235,11 @@ func sigpanic() {
 
 	switch g.sig {
 	case _EXCEPTION_ACCESS_VIOLATION:
-		if g.sigcode1 < 0x1000 || g.paniconfault {
+		if g.sigcode1 < 0x1000 {
 			panicmem()
+		}
+		if g.paniconfault {
+			panicmemAddr(g.sigcode1)
 		}
 		print("unexpected fault address ", hex(g.sigcode1), "\n")
 		throw("fault")

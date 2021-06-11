@@ -8,7 +8,6 @@ package syscall
 
 import (
 	"errors"
-	"io"
 	"sync"
 	"syscall/js"
 )
@@ -34,6 +33,7 @@ var (
 type jsFile struct {
 	path    string
 	entries []string
+	dirIdx  int // entries[:dirIdx] have already been returned in ReadDirent
 	pos     int64
 	seeked  bool
 }
@@ -101,6 +101,10 @@ func Open(path string, openmode int, perm uint32) (int, error) {
 		}
 	}
 
+	if path[0] != '/' {
+		cwd := jsProcess.Call("cwd").String()
+		path = cwd + "/" + path
+	}
 	f := &jsFile{
 		path:    path,
 		entries: entries,
@@ -141,8 +145,8 @@ func ReadDirent(fd int, buf []byte) (int, error) {
 	}
 
 	n := 0
-	for len(f.entries) > 0 {
-		entry := f.entries[0]
+	for f.dirIdx < len(f.entries) {
+		entry := f.entries[f.dirIdx]
 		l := 2 + len(entry)
 		if l > len(buf) {
 			break
@@ -152,7 +156,7 @@ func ReadDirent(fd int, buf []byte) (int, error) {
 		copy(buf[2:], entry)
 		buf = buf[l:]
 		n += l
-		f.entries = f.entries[1:]
+		f.dirIdx++
 	}
 
 	return n, nil
@@ -259,7 +263,7 @@ func Lchown(path string, uid, gid int) error {
 	if err := checkPath(path); err != nil {
 		return err
 	}
-	if jsFS.Get("lchown") == js.Undefined() {
+	if jsFS.Get("lchown").IsUndefined() {
 		// fs.lchown is unavailable on Linux until Node.js 10.6.0
 		// TODO(neelance): remove when we require at least this Node.js version
 		return ENOSYS
@@ -404,6 +408,14 @@ func Write(fd int, b []byte) (int, error) {
 		return n, err
 	}
 
+	if faketime && (fd == 1 || fd == 2) {
+		n := faketimeWrite(fd, b)
+		if n < 0 {
+			return 0, errnoErr(Errno(-n))
+		}
+		return n, nil
+	}
+
 	buf := uint8Array.New(len(b))
 	js.CopyBytesToJS(buf, b)
 	n, err := fsCall("write", fd, buf, 0, len(b), nil)
@@ -443,11 +455,11 @@ func Seek(fd int, offset int64, whence int) (int64, error) {
 
 	var newPos int64
 	switch whence {
-	case io.SeekStart:
+	case 0:
 		newPos = offset
-	case io.SeekCurrent:
+	case 1:
 		newPos = f.pos + offset
-	case io.SeekEnd:
+	case 2:
 		var st Stat_t
 		if err := Fstat(fd, &st); err != nil {
 			return 0, err
@@ -462,6 +474,7 @@ func Seek(fd int, offset int64, whence int) (int64, error) {
 	}
 
 	f.seeked = true
+	f.dirIdx = 0 // Reset directory read position. See issue 35767.
 	f.pos = newPos
 	return newPos, nil
 }
@@ -485,11 +498,11 @@ func fsCall(name string, args ...interface{}) (js.Value, error) {
 	}
 
 	c := make(chan callResult, 1)
-	jsFS.Call(name, append(args, js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+	f := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		var res callResult
 
 		if len(args) >= 1 { // on Node.js 8, fs.utimes calls the callback without any arguments
-			if jsErr := args[0]; jsErr != js.Null() {
+			if jsErr := args[0]; !jsErr.IsNull() {
 				res.err = mapJSError(jsErr)
 			}
 		}
@@ -501,7 +514,9 @@ func fsCall(name string, args ...interface{}) (js.Value, error) {
 
 		c <- res
 		return nil
-	}))...)
+	})
+	defer f.Release()
+	jsFS.Call(name, append(args, f)...)
 	res := <-c
 	return res.val, res.err
 }

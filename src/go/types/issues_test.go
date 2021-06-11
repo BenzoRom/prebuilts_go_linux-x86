@@ -12,6 +12,7 @@ import (
 	"go/ast"
 	"go/importer"
 	"go/parser"
+	"go/token"
 	"internal/testenv"
 	"sort"
 	"strings"
@@ -464,4 +465,87 @@ func TestIssue29029(t *testing.T) {
 	if got != want {
 		t.Errorf("\ngot : %swant: %s", got, want)
 	}
+}
+
+func TestIssue34151(t *testing.T) {
+	const asrc = `package a; type I interface{ M() }; type T struct { F interface { I } }`
+	const bsrc = `package b; import "a"; type T struct { F interface { a.I } }; var _ = a.T(T{})`
+
+	a, err := pkgFor("a", asrc, nil)
+	if err != nil {
+		t.Fatalf("package %s failed to typecheck: %v", a.Name(), err)
+	}
+
+	bast := mustParse(t, bsrc)
+	conf := Config{Importer: importHelper{a}}
+	b, err := conf.Check(bast.Name.Name, fset, []*ast.File{bast}, nil)
+	if err != nil {
+		t.Errorf("package %s failed to typecheck: %v", b.Name(), err)
+	}
+}
+
+type importHelper struct {
+	pkg *Package
+}
+
+func (h importHelper) Import(path string) (*Package, error) {
+	if path != h.pkg.Path() {
+		return nil, fmt.Errorf("got package path %q; want %q", path, h.pkg.Path())
+	}
+	return h.pkg, nil
+}
+
+// TestIssue34921 verifies that we don't update an imported type's underlying
+// type when resolving an underlying type. Specifically, when determining the
+// underlying type of b.T (which is the underlying type of a.T, which is int)
+// we must not set the underlying type of a.T again since that would lead to
+// a race condition if package b is imported elsewhere, in a package that is
+// concurrently type-checked.
+func TestIssue34921(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Error(r)
+		}
+	}()
+
+	var sources = []string{
+		`package a; type T int`,
+		`package b; import "a"; type T a.T`,
+	}
+
+	var pkg *Package
+	for _, src := range sources {
+		f := mustParse(t, src)
+		conf := Config{Importer: importHelper{pkg}}
+		res, err := conf.Check(f.Name.Name, fset, []*ast.File{f}, nil)
+		if err != nil {
+			t.Errorf("%q failed to typecheck: %v", src, err)
+		}
+		pkg = res // res is imported by the next package in this test
+	}
+}
+
+func TestIssue43088(t *testing.T) {
+	// type T1 struct {
+	//         _ T2
+	// }
+	//
+	// type T2 struct {
+	//         _ struct {
+	//                 _ T2
+	//         }
+	// }
+	n1 := NewTypeName(token.NoPos, nil, "T1", nil)
+	T1 := NewNamed(n1, nil, nil)
+	n2 := NewTypeName(token.NoPos, nil, "T2", nil)
+	T2 := NewNamed(n2, nil, nil)
+	s1 := NewStruct([]*Var{NewField(token.NoPos, nil, "_", T2, false)}, nil)
+	T1.SetUnderlying(s1)
+	s2 := NewStruct([]*Var{NewField(token.NoPos, nil, "_", T2, false)}, nil)
+	s3 := NewStruct([]*Var{NewField(token.NoPos, nil, "_", s2, false)}, nil)
+	T2.SetUnderlying(s3)
+
+	// These calls must terminate (no endless recursion).
+	Comparable(T1)
+	Comparable(T2)
 }

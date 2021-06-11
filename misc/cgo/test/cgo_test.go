@@ -58,6 +58,7 @@ func Test27660(t *testing.T)                 { test27660(t) }
 func Test28896(t *testing.T)                 { test28896(t) }
 func Test30065(t *testing.T)                 { test30065(t) }
 func Test32579(t *testing.T)                 { test32579(t) }
+func Test31891(t *testing.T)                 { test31891(t) }
 func TestAlign(t *testing.T)                 { testAlign(t) }
 func TestAtol(t *testing.T)                  { testAtol(t) }
 func TestBlocking(t *testing.T)              { testBlocking(t) }
@@ -75,6 +76,8 @@ func TestCheckConst(t *testing.T)            { testCheckConst(t) }
 func TestConst(t *testing.T)                 { testConst(t) }
 func TestCthread(t *testing.T)               { testCthread(t) }
 func TestEnum(t *testing.T)                  { testEnum(t) }
+func TestNamedEnum(t *testing.T)             { testNamedEnum(t) }
+func TestCastToEnum(t *testing.T)            { testCastToEnum(t) }
 func TestErrno(t *testing.T)                 { testErrno(t) }
 func TestFpVar(t *testing.T)                 { testFpVar(t) }
 func TestHelpers(t *testing.T)               { testHelpers(t) }
@@ -91,5 +94,6 @@ func TestThreadLock(t *testing.T)            { testThreadLockFunc(t) }
 func TestUnsignedInt(t *testing.T)           { testUnsignedInt(t) }
 func TestZeroArgCallback(t *testing.T)       { testZeroArgCallback(t) }
 
-func BenchmarkCgoCall(b *testing.B)  { benchCgoCall(b) }
-func BenchmarkGoString(b *testing.B) { benchGoString(b) }
+func BenchmarkCgoCall(b *testing.B)     { benchCgoCall(b) }
+func BenchmarkGoString(b *testing.B)    { benchGoString(b) }
+func BenchmarkCGoCallback(b *testing.B) { benchCallback(b) }

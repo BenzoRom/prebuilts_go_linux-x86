@@ -109,9 +109,6 @@ TEXT runtime·rt0_go(SB),NOSPLIT|NOFRAME,$0
 	MOVL	SP, (g_stack+stack_hi)(BP)
 
 	// find out information about the processor we're on
-#ifdef GOOS_nacl // NaCl doesn't like PUSHFL/POPFL
-	JMP 	has_cpuid
-#else
 	// first see if CPUID instruction is supported.
 	PUSHFL
 	PUSHFL
@@ -123,7 +120,6 @@ TEXT runtime·rt0_go(SB),NOSPLIT|NOFRAME,$0
 	POPFL	// restore EFLAGS
 	TESTL	$(1<<21), AX
 	JNE 	has_cpuid
-#endif
 
 bad_proc: // show that the program requires MMX.
 	MOVL	$2, 0(SP)
@@ -201,10 +197,6 @@ nocpuinfo:
 needtls:
 #ifdef GOOS_plan9
 	// skip runtime·ldt0setup(SB) and tls test on Plan 9 in all cases
-	JMP	ok
-#endif
-#ifdef GOOS_darwin
-	// skip runtime·ldt0setup(SB) on Darwin
 	JMP	ok
 #endif
 
@@ -710,25 +702,9 @@ nosave:
 	MOVL	AX, ret+8(FP)
 	RET
 
-// cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
-// Turn the fn into a Go func (by taking its address) and call
-// cgocallback_gofunc.
-TEXT runtime·cgocallback(SB),NOSPLIT,$16-16
-	LEAL	fn+0(FP), AX
-	MOVL	AX, 0(SP)
-	MOVL	frame+4(FP), AX
-	MOVL	AX, 4(SP)
-	MOVL	framesize+8(FP), AX
-	MOVL	AX, 8(SP)
-	MOVL	ctxt+12(FP), AX
-	MOVL	AX, 12(SP)
-	MOVL	$runtime·cgocallback_gofunc(SB), AX
-	CALL	AX
-	RET
-
-// cgocallback_gofunc(FuncVal*, void *frame, uintptr framesize, uintptr ctxt)
+// cgocallback(fn, frame unsafe.Pointer, ctxt uintptr)
 // See cgocall.go for more details.
-TEXT ·cgocallback_gofunc(SB),NOSPLIT,$12-16
+TEXT ·cgocallback(SB),NOSPLIT,$12-12  // Frame size must match commented places below
 	NO_LOCAL_POINTERS
 
 	// If g is nil, Go did not create the current thread.
@@ -746,13 +722,12 @@ TEXT ·cgocallback_gofunc(SB),NOSPLIT,$12-16
 	CMPL	BP, $0
 	JEQ	needm
 	MOVL	g_m(BP), BP
-	MOVL	BP, DX // saved copy of oldm
+	MOVL	BP, savedm-4(SP) // saved copy of oldm
 	JMP	havem
 needm:
-	MOVL	$0, 0(SP)
 	MOVL	$runtime·needm(SB), AX
 	CALL	AX
-	MOVL	0(SP), DX
+	MOVL	$0, savedm-4(SP) // dropm on return
 	get_tls(CX)
 	MOVL	g(CX), BP
 	MOVL	g_m(BP), BP
@@ -788,34 +763,32 @@ havem:
 	// save that information (m->curg->sched) so we can restore it.
 	// We can restore m->curg->sched.sp easily, because calling
 	// runtime.cgocallbackg leaves SP unchanged upon return.
-	// To save m->curg->sched.pc, we push it onto the stack.
-	// This has the added benefit that it looks to the traceback
-	// routine like cgocallbackg is going to return to that
-	// PC (because the frame we allocate below has the same
-	// size as cgocallback_gofunc's frame declared above)
-	// so that the traceback will seamlessly trace back into
-	// the earlier calls.
-	//
-	// In the new goroutine, 4(SP) holds the saved oldm (DX) register.
-	// 8(SP) is unused.
+	// To save m->curg->sched.pc, we push it onto the curg stack and
+	// open a frame the same size as cgocallback's g0 frame.
+	// Once we switch to the curg stack, the pushed PC will appear
+	// to be the return PC of cgocallback, so that the traceback
+	// will seamlessly trace back into the earlier calls.
 	MOVL	m_curg(BP), SI
 	MOVL	SI, g(CX)
 	MOVL	(g_sched+gobuf_sp)(SI), DI // prepare stack as DI
 	MOVL	(g_sched+gobuf_pc)(SI), BP
-	MOVL	BP, -4(DI)
-	MOVL	ctxt+12(FP), CX
-	LEAL	-(4+12)(DI), SP
-	MOVL	DX, 4(SP)
-	MOVL	CX, 0(SP)
+	MOVL	BP, -4(DI)  // "push" return PC on the g stack
+	// Gather our arguments into registers.
+	MOVL	fn+0(FP), AX
+	MOVL	frame+4(FP), BX
+	MOVL	ctxt+8(FP), CX
+	LEAL	-(4+12)(DI), SP  // Must match declared frame size
+	MOVL	AX, 0(SP)
+	MOVL	BX, 4(SP)
+	MOVL	CX, 8(SP)
 	CALL	runtime·cgocallbackg(SB)
-	MOVL	4(SP), DX
 
 	// Restore g->sched (== m->curg->sched) from saved values.
 	get_tls(CX)
 	MOVL	g(CX), SI
-	MOVL	12(SP), BP
+	MOVL	12(SP), BP  // Must match declared frame size
 	MOVL	BP, (g_sched+gobuf_pc)(SI)
-	LEAL	(12+4)(SP), DI
+	LEAL	(12+4)(SP), DI  // Must match declared frame size
 	MOVL	DI, (g_sched+gobuf_sp)(SI)
 
 	// Switch back to m->g0's stack and restore m->g0->sched.sp.
@@ -831,6 +804,7 @@ havem:
 
 	// If the m on entry was nil, we called needm above to borrow an m
 	// for the duration of the call. Since the call is over, return it with dropm.
+	MOVL	savedm-4(SP), DX
 	CMPL	DX, $0
 	JNE 3(PC)
 	MOVL	$runtime·dropm(SB), AX
@@ -911,18 +885,26 @@ TEXT runtime·emptyfunc(SB),0,$0-0
 	RET
 
 // hash function using AES hardware instructions
-TEXT runtime·aeshash(SB),NOSPLIT,$0-16
+TEXT runtime·memhash(SB),NOSPLIT,$0-16
+	CMPB	runtime·useAeshash(SB), $0
+	JEQ	noaes
 	MOVL	p+0(FP), AX	// ptr to data
 	MOVL	s+8(FP), BX	// size
 	LEAL	ret+12(FP), DX
 	JMP	aeshashbody<>(SB)
+noaes:
+	JMP	runtime·memhashFallback(SB)
 
-TEXT runtime·aeshashstr(SB),NOSPLIT,$0-12
+TEXT runtime·strhash(SB),NOSPLIT,$0-12
+	CMPB	runtime·useAeshash(SB), $0
+	JEQ	noaes
 	MOVL	p+0(FP), AX	// ptr to string object
 	MOVL	4(AX), BX	// length of string
 	MOVL	(AX), AX	// string data
 	LEAL	ret+8(FP), DX
 	JMP	aeshashbody<>(SB)
+noaes:
+	JMP	runtime·strhashFallback(SB)
 
 // AX: data
 // BX: length
@@ -1108,7 +1090,9 @@ aesloop:
 	MOVL	X4, (DX)
 	RET
 
-TEXT runtime·aeshash32(SB),NOSPLIT,$0-12
+TEXT runtime·memhash32(SB),NOSPLIT,$0-12
+	CMPB	runtime·useAeshash(SB), $0
+	JEQ	noaes
 	MOVL	p+0(FP), AX	// ptr to data
 	MOVL	h+4(FP), X0	// seed
 	PINSRD	$1, (AX), X0	// data
@@ -1117,8 +1101,12 @@ TEXT runtime·aeshash32(SB),NOSPLIT,$0-12
 	AESENC	runtime·aeskeysched+32(SB), X0
 	MOVL	X0, ret+8(FP)
 	RET
+noaes:
+	JMP	runtime·memhash32Fallback(SB)
 
-TEXT runtime·aeshash64(SB),NOSPLIT,$0-12
+TEXT runtime·memhash64(SB),NOSPLIT,$0-12
+	CMPB	runtime·useAeshash(SB), $0
+	JEQ	noaes
 	MOVL	p+0(FP), AX	// ptr to data
 	MOVQ	(AX), X0	// data
 	PINSRD	$2, h+4(FP), X0	// seed
@@ -1127,6 +1115,8 @@ TEXT runtime·aeshash64(SB),NOSPLIT,$0-12
 	AESENC	runtime·aeskeysched+32(SB), X0
 	MOVL	X0, ret+8(FP)
 	RET
+noaes:
+	JMP	runtime·memhash64Fallback(SB)
 
 // simple mask to get rid of data in the high part of the register.
 DATA masks<>+0x00(SB)/4, $0x00000000

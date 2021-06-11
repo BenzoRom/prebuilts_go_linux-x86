@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"strconv"
 	"syscall/js"
 )
@@ -41,7 +40,7 @@ const jsFetchCreds = "js.fetch:credentials"
 // Reference: https://developer.mozilla.org/en-US/docs/Web/API/WindowOrWorkerGlobalScope/fetch#Parameters
 const jsFetchRedirect = "js.fetch:redirect"
 
-var useFakeNetwork = js.Global().Get("fetch") == js.Undefined()
+var useFakeNetwork = js.Global().Get("fetch").IsUndefined()
 
 // RoundTrip implements the RoundTripper interface using the WHATWG Fetch API.
 func (t *Transport) RoundTrip(req *Request) (*Response, error) {
@@ -50,7 +49,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 	}
 
 	ac := js.Global().Get("AbortController")
-	if ac != js.Undefined() {
+	if !ac.IsUndefined() {
 		// Some browsers that support WASM don't necessarily support
 		// the AbortController. See
 		// https://developer.mozilla.org/en-US/docs/Web/API/AbortController#Browser_compatibility.
@@ -74,7 +73,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		opt.Set("redirect", h)
 		req.Header.Del(jsFetchRedirect)
 	}
-	if ac != js.Undefined() {
+	if !ac.IsUndefined() {
 		opt.Set("signal", ac.Get("signal"))
 	}
 	headers := js.Global().Get("Headers").New()
@@ -92,22 +91,29 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		// See https://github.com/web-platform-tests/wpt/issues/7693 for WHATWG tests issue.
 		// See https://developer.mozilla.org/en-US/docs/Web/API/Streams_API for more details on the Streams API
 		// and browser support.
-		body, err := ioutil.ReadAll(req.Body)
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			req.Body.Close() // RoundTrip must always close the body, including on errors.
 			return nil, err
 		}
 		req.Body.Close()
-		buf := uint8Array.New(len(body))
-		js.CopyBytesToJS(buf, body)
-		opt.Set("body", buf)
+		if len(body) != 0 {
+			buf := uint8Array.New(len(body))
+			js.CopyBytesToJS(buf, body)
+			opt.Set("body", buf)
+		}
 	}
-	respPromise := js.Global().Call("fetch", req.URL.String(), opt)
+
+	fetchPromise := js.Global().Call("fetch", req.URL.String(), opt)
 	var (
-		respCh = make(chan *Response, 1)
-		errCh  = make(chan error, 1)
+		respCh           = make(chan *Response, 1)
+		errCh            = make(chan error, 1)
+		success, failure js.Func
 	)
-	success := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+	success = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		success.Release()
+		failure.Release()
+
 		result := args[0]
 		header := Header{}
 		// https://developer.mozilla.org/en-US/docs/Web/API/Headers/entries
@@ -132,7 +138,7 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		var body io.ReadCloser
 		// The body is undefined when the browser does not support streaming response bodies (Firefox),
 		// and null in certain error cases, i.e. when the request is blocked because of CORS settings.
-		if b != js.Undefined() && b != js.Null() {
+		if !b.IsUndefined() && !b.IsNull() {
 			body = &streamReader{stream: b.Call("getReader")}
 		} else {
 			// Fall back to using ArrayBuffer
@@ -141,35 +147,29 @@ func (t *Transport) RoundTrip(req *Request) (*Response, error) {
 		}
 
 		code := result.Get("status").Int()
-		select {
-		case respCh <- &Response{
+		respCh <- &Response{
 			Status:        fmt.Sprintf("%d %s", code, StatusText(code)),
 			StatusCode:    code,
 			Header:        header,
 			ContentLength: contentLength,
 			Body:          body,
 			Request:       req,
-		}:
-		case <-req.Context().Done():
 		}
 
 		return nil
 	})
-	defer success.Release()
-	failure := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		err := fmt.Errorf("net/http: fetch() failed: %s", args[0].String())
-		select {
-		case errCh <- err:
-		case <-req.Context().Done():
-		}
+	failure = js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		success.Release()
+		failure.Release()
+		errCh <- fmt.Errorf("net/http: fetch() failed: %s", args[0].Get("message").String())
 		return nil
 	})
-	defer failure.Release()
-	respPromise.Call("then", success, failure)
+
+	fetchPromise.Call("then", success, failure)
 	select {
 	case <-req.Context().Done():
-		if ac != js.Undefined() {
-			// Abort the Fetch request
+		if !ac.IsUndefined() {
+			// Abort the Fetch request.
 			ac.Call("abort")
 		}
 		return nil, req.Context().Err()

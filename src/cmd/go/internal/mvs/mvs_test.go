@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"cmd/go/internal/module"
+	"golang.org/x/mod/module"
 )
 
 var tests = `
@@ -54,7 +54,7 @@ build A: A B C D2 E2
 
 name: cross1V
 A: B2 C D2 E1
-B1: 
+B1:
 B2: D1
 C: D2
 D1: E2
@@ -63,7 +63,7 @@ build A: A B2 C D2 E2
 
 name: cross1U
 A: B1 C
-B1: 
+B1:
 B2: D1
 C: D2
 D1: E2
@@ -72,7 +72,7 @@ build A: A B1 C D2 E1
 upgrade A B2: A B2 C D2 E2
 
 name: cross1R
-A: B C 
+A: B C
 B: D2
 C: D1
 D1: E2
@@ -165,7 +165,7 @@ M: A1 B1
 A1: X1
 B1: X2
 X1: I1
-X2: 
+X2:
 build M: M A1 B1 I1 X2
 
 # Upgrade from B1 to B2 should not drop the transitive dep on D.
@@ -229,28 +229,31 @@ E1:
 F1:
 downgrade A F1: A B1 E1
 
-name: down3
-A: 
+name: downcycle
+A: A B2
+B2: A
+B1:
+downgrade A B1: A B1
 
 # golang.org/issue/25542.
 name: noprev1
 A: B4 C2
-B2.hidden: 
-C2: 
+B2.hidden:
+C2:
 downgrade A B2.hidden: A B2.hidden C2
 
 name: noprev2
 A: B4 C2
-B2.hidden: 
-B1: 
-C2: 
+B2.hidden:
+B1:
+C2:
 downgrade A B2.hidden: A B2.hidden C2
 
 name: noprev3
 A: B4 C2
-B3: 
-B2.hidden: 
-C2: 
+B3:
+B2.hidden:
+C2:
 downgrade A B2.hidden: A B2.hidden C2
 
 # Cycles involving the target.
@@ -280,6 +283,20 @@ D2:
 build A: A B1 C1 D1
 upgrade* A: A B2 C2 D2
 
+# Cycles with multiple possible solutions.
+# (golang.org/issue/34086)
+name: cycle3
+M: A1 C2
+A1: B1
+B1: C1
+B2: C2
+C1:
+C2: B2
+build M: M A1 B2 C2
+req M: A1 B2
+req M A: A1 B2
+req M C: A1 C2
+
 # Requirement minimization.
 
 name: req1
@@ -301,8 +318,15 @@ M: A1 B1
 A1: X1
 B1: X2
 X1: I1
-X2: 
+X2:
 req M: A1 B1
+
+name: reqnone
+M: Anone B1 D1 E1
+B1: Cnone D1
+E1: Fnone
+build M: M B1 D1 E1
+req M: B1 E1
 `
 
 func Test(t *testing.T) {
@@ -316,6 +340,9 @@ func Test(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				for _, fn := range fns {
 					fn(t)
+				}
+				if len(fns) == 0 {
+					t.Errorf("no functions tested")
 				}
 			})
 		}
@@ -390,7 +417,15 @@ func Test(t *testing.T) {
 			fns = append(fns, func(t *testing.T) {
 				list, err := Upgrade(m(kf[1]), reqs, ms(kf[2:])...)
 				if err == nil {
-					list, err = Req(m(kf[1]), list, nil, reqs)
+					// Copy the reqs map, but substitute the upgraded requirements in
+					// place of the target's original requirements.
+					upReqs := make(reqsMap, len(reqs))
+					for m, r := range reqs {
+						upReqs[m] = r
+					}
+					upReqs[m(kf[1])] = list
+
+					list, err = Req(m(kf[1]), nil, upReqs)
 				}
 				checkList(t, key, list, err, val)
 			})
@@ -418,11 +453,7 @@ func Test(t *testing.T) {
 				t.Fatalf("req takes at least one argument: %q", line)
 			}
 			fns = append(fns, func(t *testing.T) {
-				list, err := BuildList(m(kf[1]), reqs)
-				if err != nil {
-					t.Fatal(err)
-				}
-				list, err = Req(m(kf[1]), list, kf[2:], reqs)
+				list, err := Req(m(kf[1]), kf[2:], reqs)
 				checkList(t, key, list, err, val)
 			})
 			continue
@@ -460,9 +491,9 @@ func (r reqsMap) Max(v1, v2 string) string {
 }
 
 func (r reqsMap) Upgrade(m module.Version) (module.Version, error) {
-	var u module.Version
+	u := module.Version{Version: "none"}
 	for k := range r {
-		if k.Path == m.Path && u.Version < k.Version && !strings.HasSuffix(k.Version, ".hidden") {
+		if k.Path == m.Path && r.Max(u.Version, k.Version) == k.Version && !strings.HasSuffix(k.Version, ".hidden") {
 			u = k
 		}
 	}

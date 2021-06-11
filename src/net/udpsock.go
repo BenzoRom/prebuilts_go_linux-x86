@@ -9,13 +9,10 @@ import (
 	"syscall"
 )
 
-// BUG(mikio): On NaCl and Plan 9, the ReadMsgUDP and
+// BUG(mikio): On Plan 9, the ReadMsgUDP and
 // WriteMsgUDP methods of UDPConn are not implemented.
 
 // BUG(mikio): On Windows, the File method of UDPConn is not
-// implemented.
-
-// BUG(mikio): On NaCl, the ListenMulticastUDP function is not
 // implemented.
 
 // BUG(mikio): On JS, methods and functions related to UDPConn are not
@@ -262,6 +259,9 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 // ListenMulticastUDP is just for convenience of simple, small
 // applications. There are golang.org/x/net/ipv4 and
 // golang.org/x/net/ipv6 packages for general purpose uses.
+//
+// Note that ListenMulticastUDP will set the IP_MULTICAST_LOOP socket option
+// to 0 under IPPROTO_IP, to disable loopback of multicast packets.
 func ListenMulticastUDP(network string, ifi *Interface, gaddr *UDPAddr) (*UDPConn, error) {
 	switch network {
 	case "udp", "udp4", "udp6":

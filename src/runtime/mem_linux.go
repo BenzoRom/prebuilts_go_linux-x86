@@ -17,7 +17,7 @@ const (
 // Don't split the stack as this method may be invoked without a valid G, which
 // prevents us from allocating more stack.
 //go:nosplit
-func sysAlloc(n uintptr, sysStat *uint64) unsafe.Pointer {
+func sysAlloc(n uintptr, sysStat *sysMemStat) unsafe.Pointer {
 	p, err := mmap(nil, n, _PROT_READ|_PROT_WRITE, _MAP_ANON|_MAP_PRIVATE, -1, 0)
 	if err != 0 {
 		if err == _EACCES {
@@ -30,7 +30,7 @@ func sysAlloc(n uintptr, sysStat *uint64) unsafe.Pointer {
 		}
 		return nil
 	}
-	mSysStatInc(sysStat, n)
+	sysStat.add(int64(n))
 	return p
 }
 
@@ -70,11 +70,11 @@ func sysUnused(v unsafe.Pointer, n uintptr) {
 		var head, tail uintptr
 		if uintptr(v)&(physHugePageSize-1) != 0 {
 			// Compute huge page containing v.
-			head = uintptr(v) &^ (physHugePageSize - 1)
+			head = alignDown(uintptr(v), physHugePageSize)
 		}
 		if (uintptr(v)+n)&(physHugePageSize-1) != 0 {
 			// Compute huge page containing v+n-1.
-			tail = (uintptr(v) + n - 1) &^ (physHugePageSize - 1)
+			tail = alignDown(uintptr(v)+n-1, physHugePageSize)
 		}
 
 		// Note that madvise will return EINVAL if the flag is
@@ -131,9 +131,9 @@ func sysUsed(v unsafe.Pointer, n uintptr) {
 func sysHugePage(v unsafe.Pointer, n uintptr) {
 	if physHugePageSize != 0 {
 		// Round v up to a huge page boundary.
-		beg := (uintptr(v) + (physHugePageSize - 1)) &^ (physHugePageSize - 1)
+		beg := alignUp(uintptr(v), physHugePageSize)
 		// Round v+n down to a huge page boundary.
-		end := (uintptr(v) + n) &^ (physHugePageSize - 1)
+		end := alignDown(uintptr(v)+n, physHugePageSize)
 
 		if beg < end {
 			madvise(unsafe.Pointer(beg), end-beg, _MADV_HUGEPAGE)
@@ -144,8 +144,8 @@ func sysHugePage(v unsafe.Pointer, n uintptr) {
 // Don't split the stack as this function may be invoked without a valid G,
 // which prevents us from allocating more stack.
 //go:nosplit
-func sysFree(v unsafe.Pointer, n uintptr, sysStat *uint64) {
-	mSysStatDec(sysStat, n)
+func sysFree(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+	sysStat.add(-int64(n))
 	munmap(v, n)
 }
 
@@ -161,8 +161,8 @@ func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
 	return p
 }
 
-func sysMap(v unsafe.Pointer, n uintptr, sysStat *uint64) {
-	mSysStatInc(sysStat, n)
+func sysMap(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+	sysStat.add(int64(n))
 
 	p, err := mmap(v, n, _PROT_READ|_PROT_WRITE, _MAP_ANON|_MAP_FIXED|_MAP_PRIVATE, -1, 0)
 	if err == _ENOMEM {

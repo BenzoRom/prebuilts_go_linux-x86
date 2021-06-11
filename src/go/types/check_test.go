@@ -33,7 +33,8 @@ import (
 	"go/scanner"
 	"go/token"
 	"internal/testenv"
-	"io/ioutil"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -42,8 +43,9 @@ import (
 )
 
 var (
-	listErrors = flag.Bool("errlist", false, "list errors")
-	testFiles  = flag.String("files", "", "space-separated list of test files")
+	haltOnError = flag.Bool("halt", false, "halt on error")
+	listErrors  = flag.Bool("errlist", false, "list errors")
+	testFiles   = flag.String("files", "", "space-separated list of test files")
 )
 
 // The test filenames do not end in .go so that they are invisible
@@ -92,10 +94,6 @@ var tests = [][]string{
 	{"testdata/issues.src"},
 	{"testdata/blank.src"},
 	{"testdata/issue25008b.src", "testdata/issue25008a.src"}, // order (b before a) is crucial!
-	{"testdata/issue26390.src"},                              // stand-alone test to ensure case is triggered
-	{"testdata/issue23203a.src"},
-	{"testdata/issue23203b.src"},
-	{"testdata/issue28251.src"},
 }
 
 var fset = token.NewFileSet()
@@ -155,7 +153,7 @@ func errMap(t *testing.T, testname string, files []*ast.File) map[string][]strin
 
 	for _, file := range files {
 		filename := fset.Position(file.Package).Filename
-		src, err := ioutil.ReadFile(filename)
+		src, err := os.ReadFile(filename)
 		if err != nil {
 			t.Fatalf("%s: could not read %s", testname, filename)
 		}
@@ -257,11 +255,14 @@ func checkFiles(t *testing.T, testfiles []string) {
 	// typecheck and collect typechecker errors
 	var conf Config
 	// special case for importC.src
-	if len(testfiles) == 1 && testfiles[0] == "testdata/importC.src" {
+	if len(testfiles) == 1 && strings.HasSuffix(testfiles[0], "importC.src") {
 		conf.FakeImportC = true
 	}
 	conf.Importer = importer.Default()
 	conf.Error = func(err error) {
+		if *haltOnError {
+			defer panic(err)
+		}
 		if *listErrors {
 			t.Error(err)
 			return
@@ -276,6 +277,17 @@ func checkFiles(t *testing.T, testfiles []string) {
 
 	if *listErrors {
 		return
+	}
+
+	for _, err := range errlist {
+		err, ok := err.(Error)
+		if !ok {
+			continue
+		}
+		code := readCode(err)
+		if code == 0 {
+			t.Errorf("missing error code: %v", err)
+		}
 	}
 
 	// match and eliminate errors;
@@ -309,5 +321,29 @@ func TestCheck(t *testing.T) {
 	// Otherwise, run all the tests.
 	for _, files := range tests {
 		checkFiles(t, files)
+	}
+}
+
+func TestFixedBugs(t *testing.T) { testDir(t, "fixedbugs") }
+
+func testDir(t *testing.T, dir string) {
+	testenv.MustHaveGoBuild(t)
+
+	dirs, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, d := range dirs {
+		testname := filepath.Base(d.Name())
+		testname = strings.TrimSuffix(testname, filepath.Ext(testname))
+		t.Run(testname, func(t *testing.T) {
+			filename := filepath.Join(dir, d.Name())
+			if d.IsDir() {
+				t.Errorf("skipped directory %q", filename)
+				return
+			}
+			checkFiles(t, []string{filename})
+		})
 	}
 }

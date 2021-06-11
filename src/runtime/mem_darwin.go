@@ -11,12 +11,12 @@ import (
 // Don't split the stack as this function may be invoked without a valid G,
 // which prevents us from allocating more stack.
 //go:nosplit
-func sysAlloc(n uintptr, sysStat *uint64) unsafe.Pointer {
+func sysAlloc(n uintptr, sysStat *sysMemStat) unsafe.Pointer {
 	v, err := mmap(nil, n, _PROT_READ|_PROT_WRITE, _MAP_ANON|_MAP_PRIVATE, -1, 0)
 	if err != 0 {
 		return nil
 	}
-	mSysStatInc(sysStat, n)
+	sysStat.add(int64(n))
 	return v
 }
 
@@ -39,8 +39,8 @@ func sysHugePage(v unsafe.Pointer, n uintptr) {
 // Don't split the stack as this function may be invoked without a valid G,
 // which prevents us from allocating more stack.
 //go:nosplit
-func sysFree(v unsafe.Pointer, n uintptr, sysStat *uint64) {
-	mSysStatDec(sysStat, n)
+func sysFree(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+	sysStat.add(-int64(n))
 	munmap(v, n)
 }
 
@@ -49,19 +49,7 @@ func sysFault(v unsafe.Pointer, n uintptr) {
 }
 
 func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
-	flags := int32(_MAP_ANON | _MAP_PRIVATE)
-	if raceenabled {
-		// Currently the race detector expects memory to live within a certain
-		// range, and on Darwin 10.10 mmap is prone to ignoring hints, moreso
-		// than later versions and other BSDs (#26475). So, even though it's
-		// potentially dangerous to MAP_FIXED, we do it in the race detection
-		// case because it'll help maintain the race detector's invariants.
-		//
-		// TODO(mknyszek): Drop this once support for Darwin 10.10 is dropped,
-		// and reconsider this when #24133 is addressed.
-		flags |= _MAP_FIXED
-	}
-	p, err := mmap(v, n, _PROT_NONE, flags, -1, 0)
+	p, err := mmap(v, n, _PROT_NONE, _MAP_ANON|_MAP_PRIVATE, -1, 0)
 	if err != 0 {
 		return nil
 	}
@@ -70,8 +58,8 @@ func sysReserve(v unsafe.Pointer, n uintptr) unsafe.Pointer {
 
 const _ENOMEM = 12
 
-func sysMap(v unsafe.Pointer, n uintptr, sysStat *uint64) {
-	mSysStatInc(sysStat, n)
+func sysMap(v unsafe.Pointer, n uintptr, sysStat *sysMemStat) {
+	sysStat.add(int64(n))
 
 	p, err := mmap(v, n, _PROT_READ|_PROT_WRITE, _MAP_ANON|_MAP_FIXED|_MAP_PRIVATE, -1, 0)
 	if err == _ENOMEM {

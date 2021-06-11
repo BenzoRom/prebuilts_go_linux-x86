@@ -6,8 +6,8 @@ package main
 
 import (
 	"fmt"
+	"internal/obscuretestdata"
 	"internal/testenv"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +30,7 @@ func testMain(m *testing.M) int {
 		return 0
 	}
 
-	tmpDir, err := ioutil.TempDir("", "TestNM")
+	tmpDir, err := os.MkdirTemp("", "TestNM")
 	if err != nil {
 		fmt.Println("TempDir failed:", err)
 		return 2
@@ -57,8 +57,8 @@ func TestNonGoExecs(t *testing.T) {
 	testfiles := []string{
 		"debug/elf/testdata/gcc-386-freebsd-exec",
 		"debug/elf/testdata/gcc-amd64-linux-exec",
-		"debug/macho/testdata/gcc-386-darwin-exec",
-		"debug/macho/testdata/gcc-amd64-darwin-exec",
+		"debug/macho/testdata/gcc-386-darwin-exec.base64",   // golang.org/issue/34986
+		"debug/macho/testdata/gcc-amd64-darwin-exec.base64", // golang.org/issue/34986
 		// "debug/pe/testdata/gcc-amd64-mingw-exec", // no symbols!
 		"debug/pe/testdata/gcc-386-mingw-exec",
 		"debug/plan9obj/testdata/amd64-plan9-exec",
@@ -67,6 +67,16 @@ func TestNonGoExecs(t *testing.T) {
 	}
 	for _, f := range testfiles {
 		exepath := filepath.Join(runtime.GOROOT(), "src", f)
+		if strings.HasSuffix(f, ".base64") {
+			tf, err := obscuretestdata.DecodeToTempFile(exepath)
+			if err != nil {
+				t.Errorf("obscuretestdata.DecodeToTempFile(%s): %v", exepath, err)
+				continue
+			}
+			defer os.Remove(tf)
+			exepath = tf
+		}
+
 		cmd := exec.Command(testnmpath, exepath)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -77,7 +87,7 @@ func TestNonGoExecs(t *testing.T) {
 
 func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir("", "TestGoExec")
+	tmpdir, err := os.MkdirTemp("", "TestGoExec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,8 +169,11 @@ func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 				return true
 			}
 		}
-		if runtime.GOOS == "windows" && runtime.GOARCH == "arm" {
+		if runtime.GOOS == "windows" {
 			return true
+		}
+		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+			return true // On darwin/arm64 everything is PIE
 		}
 		return false
 	}
@@ -208,7 +221,7 @@ func TestGoExec(t *testing.T) {
 
 func testGoLib(t *testing.T, iscgo bool) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir("", "TestGoLib")
+	tmpdir, err := os.MkdirTemp("", "TestGoLib")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +244,7 @@ func testGoLib(t *testing.T, iscgo bool) {
 		err = e
 	}
 	if err == nil {
-		err = ioutil.WriteFile(filepath.Join(libpath, "go.mod"), []byte("module mylib\n"), 0666)
+		err = os.WriteFile(filepath.Join(libpath, "go.mod"), []byte("module mylib\n"), 0666)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +285,7 @@ func testGoLib(t *testing.T, iscgo bool) {
 	if iscgo {
 		syms = append(syms, symType{"B", "mylib.TestCgodata", false, false})
 		syms = append(syms, symType{"T", "mylib.TestCgofunc", false, false})
-		if runtime.GOOS == "darwin" || (runtime.GOOS == "windows" && runtime.GOARCH == "386") {
+		if runtime.GOOS == "darwin" || runtime.GOOS == "ios" || (runtime.GOOS == "windows" && runtime.GOARCH == "386") {
 			syms = append(syms, symType{"D", "_cgodata", true, false})
 			syms = append(syms, symType{"T", "_cgofunc", true, false})
 		} else if runtime.GOOS == "aix" {

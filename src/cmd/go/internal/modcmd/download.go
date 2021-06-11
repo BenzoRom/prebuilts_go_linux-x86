@@ -5,30 +5,35 @@
 package modcmd
 
 import (
-	"cmd/go/internal/cfg"
+	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 
 	"cmd/go/internal/base"
+	"cmd/go/internal/cfg"
 	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
-	"cmd/go/internal/module"
-	"cmd/go/internal/par"
+
+	"golang.org/x/mod/module"
 )
 
 var cmdDownload = &base.Command{
-	UsageLine: "go mod download [-json] [modules]",
+	UsageLine: "go mod download [-x] [-json] [modules]",
 	Short:     "download modules to local cache",
 	Long: `
 Download downloads the named modules, which can be module patterns selecting
 dependencies of the main module or module queries of the form path@version.
-With no arguments, download applies to all dependencies of the main module.
+With no arguments, download applies to all dependencies of the main module
+(equivalent to 'go mod download all').
 
 The go command will automatically download modules as needed during ordinary
 execution. The "go mod download" command is useful mainly for pre-filling
 the local cache or to compute the answers for a Go module proxy.
 
-By default, download reports errors to standard error but is otherwise silent.
+By default, download writes nothing to standard output. It may print progress
+messages and errors to standard error.
+
 The -json flag causes download to print a sequence of JSON objects
 to standard output, describing each downloaded module (or failure),
 corresponding to this Go struct:
@@ -43,10 +48,13 @@ corresponding to this Go struct:
         Dir      string // absolute path to cached source root directory
         Sum      string // checksum for path, version (as in go.sum)
         GoModSum string // checksum for go.mod (as in go.sum)
-        Latest   bool   // would @latest resolve to this version?
     }
 
-See 'go help modules' for more about module queries.
+The -x flag causes download to print the commands download executes.
+
+See https://golang.org/ref/mod#go-mod-download for more about 'go mod download'.
+
+See https://golang.org/ref/mod#version-queries for more about version queries.
 	`,
 }
 
@@ -54,6 +62,10 @@ var downloadJSON = cmdDownload.Flag.Bool("json", false, "")
 
 func init() {
 	cmdDownload.Run = runDownload // break init cycle
+
+	// TODO(jayconrod): https://golang.org/issue/35849 Apply -x to other 'go mod' commands.
+	cmdDownload.Flag.BoolVar(&cfg.BuildX, "x", false, "")
+	base.AddModCommonFlags(&cmdDownload.Flag)
 }
 
 type moduleJSON struct {
@@ -66,72 +78,31 @@ type moduleJSON struct {
 	Dir      string `json:",omitempty"`
 	Sum      string `json:",omitempty"`
 	GoModSum string `json:",omitempty"`
-	Latest   bool   `json:",omitempty"`
 }
 
-func runDownload(cmd *base.Command, args []string) {
+func runDownload(ctx context.Context, cmd *base.Command, args []string) {
 	// Check whether modules are enabled and whether we're in a module.
-	if cfg.Getenv("GO111MODULE") == "off" {
-		base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
-	}
+	modload.ForceUseModules = true
 	if !modload.HasModRoot() && len(args) == 0 {
 		base.Fatalf("go mod download: no modules specified (see 'go help mod download')")
 	}
-	if len(args) == 0 {
+	haveExplicitArgs := len(args) > 0
+	if !haveExplicitArgs {
 		args = []string{"all"}
 	}
-
-	var mods []*moduleJSON
-	var work par.Work
-	listU := false
-	listVersions := false
-	for _, info := range modload.ListModules(args, listU, listVersions) {
-		if info.Replace != nil {
-			info = info.Replace
-		}
-		if info.Version == "" && info.Error == nil {
-			// main module
-			continue
-		}
-		m := &moduleJSON{
-			Path:    info.Path,
-			Version: info.Version,
-		}
-		mods = append(mods, m)
-		if info.Error != nil {
-			m.Error = info.Error.Err
-			continue
-		}
-		work.Add(m)
-	}
-
-	latest := map[string]string{} // path → version
-	if *downloadJSON {
-		// We need to populate the Latest field, but if the main module depends on a
-		// version newer than latest — or if the version requested on the command
-		// line is itself newer than latest — that's not trivial to determine from
-		// the info returned by ListModules. Instead, we issue a separate
-		// ListModules request for "latest", which should be inexpensive relative to
-		// downloading the modules.
-		var latestArgs []string
-		for _, m := range mods {
-			if m.Error != "" {
-				continue
-			}
-			latestArgs = append(latestArgs, m.Path+"@latest")
-		}
-
-		if len(latestArgs) > 0 {
-			for _, info := range modload.ListModules(latestArgs, listU, listVersions) {
-				if info.Version != "" {
-					latest[info.Path] = info.Version
-				}
+	if modload.HasModRoot() {
+		modload.LoadModFile(ctx) // to fill Target
+		targetAtUpgrade := modload.Target.Path + "@upgrade"
+		targetAtPatch := modload.Target.Path + "@patch"
+		for _, arg := range args {
+			switch arg {
+			case modload.Target.Path, targetAtUpgrade, targetAtPatch:
+				os.Stderr.WriteString("go mod download: skipping argument " + arg + " that resolves to the main module\n")
 			}
 		}
 	}
 
-	work.Do(10, func(item interface{}) {
-		m := item.(*moduleJSON)
+	downloadModule := func(m *moduleJSON) {
 		var err error
 		m.Info, err = modfetch.InfoFile(m.Path, m.Version)
 		if err != nil {
@@ -149,27 +120,73 @@ func runDownload(cmd *base.Command, args []string) {
 			return
 		}
 		mod := module.Version{Path: m.Path, Version: m.Version}
-		m.Zip, err = modfetch.DownloadZip(mod)
+		m.Zip, err = modfetch.DownloadZip(ctx, mod)
 		if err != nil {
 			m.Error = err.Error()
 			return
 		}
 		m.Sum = modfetch.Sum(mod)
-		m.Dir, err = modfetch.Download(mod)
+		m.Dir, err = modfetch.Download(ctx, mod)
 		if err != nil {
 			m.Error = err.Error()
 			return
 		}
-		if latest[m.Path] == m.Version {
-			m.Latest = true
+	}
+
+	var mods []*moduleJSON
+	listU := false
+	listVersions := false
+	listRetractions := false
+	type token struct{}
+	sem := make(chan token, runtime.GOMAXPROCS(0))
+	infos := modload.ListModules(ctx, args, listU, listVersions, listRetractions)
+	if !haveExplicitArgs {
+		// 'go mod download' is sometimes run without arguments to pre-populate
+		// the module cache. It may fetch modules that aren't needed to build
+		// packages in the main mdoule. This is usually not intended, so don't save
+		// sums for downloaded modules (golang.org/issue/45332).
+		// TODO(golang.org/issue/45551): For now, save sums needed to load the
+		// build list (same as 1.15 behavior). In the future, report an error if
+		// go.mod or go.sum need to be updated after loading the build list.
+		modload.WriteGoMod()
+		modload.DisallowWriteGoMod()
+	}
+
+	for _, info := range infos {
+		if info.Replace != nil {
+			info = info.Replace
 		}
-	})
+		if info.Version == "" && info.Error == nil {
+			// main module or module replaced with file path.
+			// Nothing to download.
+			continue
+		}
+		m := &moduleJSON{
+			Path:    info.Path,
+			Version: info.Version,
+		}
+		mods = append(mods, m)
+		if info.Error != nil {
+			m.Error = info.Error.Err
+			continue
+		}
+		sem <- token{}
+		go func() {
+			downloadModule(m)
+			<-sem
+		}()
+	}
+
+	// Fill semaphore channel to wait for goroutines to finish.
+	for n := cap(sem); n > 0; n-- {
+		sem <- token{}
+	}
 
 	if *downloadJSON {
 		for _, m := range mods {
 			b, err := json.MarshalIndent(m, "", "\t")
 			if err != nil {
-				base.Fatalf("%v", err)
+				base.Fatalf("go mod download: %v", err)
 			}
 			os.Stdout.Write(append(b, '\n'))
 			if m.Error != "" {
@@ -179,9 +196,19 @@ func runDownload(cmd *base.Command, args []string) {
 	} else {
 		for _, m := range mods {
 			if m.Error != "" {
-				base.Errorf("%s", m.Error)
+				base.Errorf("go mod download: %v", m.Error)
 			}
 		}
 		base.ExitIfErrors()
+	}
+
+	// If there were explicit arguments, update go.mod and especially go.sum.
+	// 'go mod download mod@version' is a useful way to add a sum without using
+	// 'go get mod@version', which may have other side effects. We print this in
+	// some error message hints.
+	//
+	// Don't save sums for 'go mod download' without arguments; see comment above.
+	if haveExplicitArgs {
+		modload.WriteGoMod()
 	}
 }

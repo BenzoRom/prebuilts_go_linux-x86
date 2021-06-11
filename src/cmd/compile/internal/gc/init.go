@@ -45,7 +45,6 @@ func fninit(n []*Node) {
 	if len(nf) > 0 {
 		lineno = nf[0].Pos // prolog/epilog gets line number of first init stmt
 		initializers := lookup("init")
-		disableExport(initializers)
 		fn := dclfunc(initializers, nod(OTFUNC, nil, nil))
 		for _, dcl := range dummyInitFn.Func.Dcl {
 			dcl.Name.Curfn = fn
@@ -60,7 +59,7 @@ func fninit(n []*Node) {
 		Curfn = fn
 		typecheckslice(nf, ctxStmt)
 		Curfn = nil
-		funccompile(fn)
+		xtop = append(xtop, fn)
 		fns = append(fns, initializers.Linksym())
 	}
 	if dummyInitFn.Func.Dcl != nil {
@@ -69,10 +68,16 @@ func fninit(n []*Node) {
 		// something's weird if we get here.
 		Fatalf("dummyInitFn still has declarations")
 	}
+	dummyInitFn = nil
 
 	// Record user init functions.
 	for i := 0; i < renameinitgen; i++ {
 		s := lookupN("init.", i)
+		fn := asNode(s.Def).Name.Defn
+		// Skip init functions with empty bodies.
+		if fn.Nbody.Len() == 1 && fn.Nbody.First().Op == OEMPTY {
+			continue
+		}
 		fns = append(fns, s.Linksym())
 	}
 
@@ -101,10 +106,4 @@ func fninit(n []*Node) {
 	// An initTask has pointers, but none into the Go heap.
 	// It's not quite read only, the state field must be modifiable.
 	ggloblsym(lsym, int32(ot), obj.NOPTR)
-}
-
-func (n *Node) checkInitFuncSignature() {
-	if n.Type.NumRecvs()+n.Type.NumParams()+n.Type.NumResults() > 0 {
-		Fatalf("init function cannot have receiver, params, or results: %v (%v)", n, n.Type)
-	}
 }

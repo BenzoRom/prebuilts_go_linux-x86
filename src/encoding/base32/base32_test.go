@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"io/ioutil"
 	"strings"
 	"testing"
 )
@@ -361,9 +360,9 @@ func TestBig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encoder.Close() = %v want nil", err)
 	}
-	decoded, err := ioutil.ReadAll(NewDecoder(StdEncoding, encoded))
+	decoded, err := io.ReadAll(NewDecoder(StdEncoding, encoded))
 	if err != nil {
-		t.Fatalf("ioutil.ReadAll(NewDecoder(...)): %v", err)
+		t.Fatalf("io.ReadAll(NewDecoder(...)): %v", err)
 	}
 
 	if !bytes.Equal(raw, decoded) {
@@ -428,20 +427,29 @@ LNEBUWIIDFON2CA3DBMJXXE5LNFY==
 	encodedShort := strings.ReplaceAll(encoded, "\n", "")
 
 	dec := NewDecoder(StdEncoding, strings.NewReader(encoded))
-	res1, err := ioutil.ReadAll(dec)
+	res1, err := io.ReadAll(dec)
 	if err != nil {
 		t.Errorf("ReadAll failed: %v", err)
 	}
 
 	dec = NewDecoder(StdEncoding, strings.NewReader(encodedShort))
 	var res2 []byte
-	res2, err = ioutil.ReadAll(dec)
+	res2, err = io.ReadAll(dec)
 	if err != nil {
 		t.Errorf("ReadAll failed: %v", err)
 	}
 
 	if !bytes.Equal(res1, res2) {
 		t.Error("Decoded results not equal")
+	}
+}
+
+func BenchmarkEncode(b *testing.B) {
+	data := make([]byte, 8192)
+	buf := make([]byte, StdEncoding.EncodedLen(len(data)))
+	b.SetBytes(int64(len(data)))
+	for i := 0; i < b.N; i++ {
+		StdEncoding.Encode(buf, data)
 	}
 }
 
@@ -453,6 +461,15 @@ func BenchmarkEncodeToString(b *testing.B) {
 	}
 }
 
+func BenchmarkDecode(b *testing.B) {
+	data := make([]byte, StdEncoding.EncodedLen(8192))
+	StdEncoding.Encode(data, make([]byte, 8192))
+	buf := make([]byte, 8192)
+	b.SetBytes(int64(len(data)))
+	for i := 0; i < b.N; i++ {
+		StdEncoding.Decode(buf, data)
+	}
+}
 func BenchmarkDecodeString(b *testing.B) {
 	data := StdEncoding.EncodeToString(make([]byte, 8192))
 	b.SetBytes(int64(len(data)))
@@ -601,7 +618,7 @@ func TestBufferedDecodingSameError(t *testing.T) {
 			}()
 
 			decoder := NewDecoder(StdEncoding, pr)
-			_, err := ioutil.ReadAll(decoder)
+			_, err := io.ReadAll(decoder)
 
 			if err != testcase.expected {
 				t.Errorf("Expected %v, got %v; case %s %+v", testcase.expected, err, testcase.prefix, chunks)
@@ -700,7 +717,7 @@ func TestDecodeReadAll(t *testing.T) {
 				encoded = strings.ReplaceAll(encoded, "=", "")
 			}
 
-			decReader, err := ioutil.ReadAll(NewDecoder(encoding, strings.NewReader(encoded)))
+			decReader, err := io.ReadAll(NewDecoder(encoding, strings.NewReader(encoded)))
 			if err != nil {
 				t.Errorf("NewDecoder error: %v", err)
 			}

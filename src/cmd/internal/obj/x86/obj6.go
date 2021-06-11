@@ -1,5 +1,5 @@
 // Inferno utils/6l/pass.c
-// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/pass.c
+// https://bitbucket.org/inferno-os/inferno-os/src/master/utils/6l/pass.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -48,7 +48,6 @@ func CanUse1InsnTLS(ctxt *obj.Link) bool {
 	if ctxt.Arch.Family == sys.I386 {
 		switch ctxt.Headtype {
 		case objabi.Hlinux,
-			objabi.Hnacl,
 			objabi.Hplan9,
 			objabi.Hwindows:
 			return false
@@ -208,14 +207,6 @@ func progedit(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 		}
 	}
 
-	if ctxt.Headtype == objabi.Hnacl && ctxt.Arch.Family == sys.AMD64 {
-		if p.GetFrom3() != nil {
-			nacladdr(ctxt, p, p.GetFrom3())
-		}
-		nacladdr(ctxt, p, &p.From)
-		nacladdr(ctxt, p, &p.To)
-	}
-
 	// Rewrite float constants to values stored in memory.
 	switch p.As {
 	// Convert AMOVSS $(0), Xx to AXORPS Xx, Xx
@@ -333,9 +324,9 @@ func rewriteToUseGot(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 		// flags and duffzero on 386 does not otherwise do so).
 		var sym *obj.LSym
 		if p.As == obj.ADUFFZERO {
-			sym = ctxt.Lookup("runtime.duffzero")
+			sym = ctxt.LookupABI("runtime.duffzero", obj.ABIInternal)
 		} else {
-			sym = ctxt.Lookup("runtime.duffcopy")
+			sym = ctxt.LookupABI("runtime.duffcopy", obj.ABIInternal)
 		}
 		offset := p.To.Offset
 		p.As = mov
@@ -428,6 +419,9 @@ func rewriteToUseGot(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 		// to a PLT, so make sure the GOT pointer is loaded into BX.
 		// RegTo2 is set on the replacement call insn to stop it being
 		// processed when it is in turn passed to progedit.
+		//
+		// We disable open-coded defers in buildssa() on 386 ONLY with shared
+		// libraries because of this extra code added before deferreturn calls.
 		if ctxt.Arch.Family == sys.AMD64 || (p.To.Sym != nil && p.To.Sym.Local()) || p.RegTo2 != 0 {
 			return
 		}
@@ -568,44 +562,12 @@ func rewriteToPcrel(ctxt *obj.Link, p *obj.Prog, newprog obj.ProgAlloc) {
 	obj.Nopout(p)
 }
 
-func nacladdr(ctxt *obj.Link, p *obj.Prog, a *obj.Addr) {
-	if p.As == ALEAL || p.As == ALEAQ {
-		return
-	}
-
-	if a.Reg == REG_BP {
-		ctxt.Diag("invalid address: %v", p)
-		return
-	}
-
-	if a.Reg == REG_TLS {
-		a.Reg = REG_BP
-	}
-	if a.Type == obj.TYPE_MEM && a.Name == obj.NAME_NONE {
-		switch a.Reg {
-		// all ok
-		case REG_BP, REG_SP, REG_R15:
-			break
-
-		default:
-			if a.Index != REG_NONE {
-				ctxt.Diag("invalid address %v", p)
-			}
-			a.Index = a.Reg
-			if a.Index != REG_NONE {
-				a.Scale = 1
-			}
-			a.Reg = REG_R15
-		}
-	}
-}
-
 func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
-	if cursym.Func.Text == nil || cursym.Func.Text.Link == nil {
+	if cursym.Func().Text == nil || cursym.Func().Text.Link == nil {
 		return
 	}
 
-	p := cursym.Func.Text
+	p := cursym.Func().Text
 	autoffset := int32(p.To.Offset)
 	if autoffset < 0 {
 		autoffset = 0
@@ -620,7 +582,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 	}
 
 	var bpsize int
-	if ctxt.Arch.Family == sys.AMD64 && ctxt.Framepointer_enabled &&
+	if ctxt.Arch.Family == sys.AMD64 &&
 		!p.From.Sym.NoFrame() && // (1) below
 		!(autoffset == 0 && p.From.Sym.NoSplit()) && // (2) below
 		!(autoffset == 0 && !hasCall) { // (3) below
@@ -640,12 +602,12 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 	}
 
 	textarg := int64(p.To.Val.(int32))
-	cursym.Func.Args = int32(textarg)
-	cursym.Func.Locals = int32(p.To.Offset)
+	cursym.Func().Args = int32(textarg)
+	cursym.Func().Locals = int32(p.To.Offset)
 
 	// TODO(rsc): Remove.
-	if ctxt.Arch.Family == sys.I386 && cursym.Func.Locals < 0 {
-		cursym.Func.Locals = 0
+	if ctxt.Arch.Family == sys.I386 && cursym.Func().Locals < 0 {
+		cursym.Func().Locals = 0
 	}
 
 	// TODO(rsc): Remove 'ctxt.Arch.Family == sys.AMD64 &&'.
@@ -680,7 +642,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p = load_g_cx(ctxt, p, newprog) // load g into CX
 	}
 
-	if !cursym.Func.Text.From.Sym.NoSplit() {
+	if !cursym.Func().Text.From.Sym.NoSplit() {
 		p = stacksplit(ctxt, cursym, p, newprog, autoffset, int32(textarg)) // emit split check
 	}
 
@@ -700,8 +662,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.Pos = p.Pos.WithXlogue(src.PosPrologueEnd)
 		markedPrologue = true
 	}
-
-	deltasp := autoffset
 
 	if bpsize > 0 {
 		// Save caller's BP
@@ -730,7 +690,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.To.Reg = REG_BP
 	}
 
-	if cursym.Func.Text.From.Sym.Wrapper() {
+	if cursym.Func().Text.From.Sym.Wrapper() {
 		// if g._panic != nil && g._panic.argp == FP {
 		//   g._panic.argp = bottom-of-frame
 		// }
@@ -762,13 +722,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.From.Offset = 4 * int64(ctxt.Arch.PtrSize) // g_panic
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_BX
-		if ctxt.Headtype == objabi.Hnacl && ctxt.Arch.Family == sys.AMD64 {
-			p.As = AMOVL
-			p.From.Type = obj.TYPE_MEM
-			p.From.Reg = REG_R15
-			p.From.Scale = 1
-			p.From.Index = REG_CX
-		}
 		if ctxt.Arch.Family == sys.I386 {
 			p.As = AMOVL
 		}
@@ -780,7 +733,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.From.Reg = REG_BX
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_BX
-		if ctxt.Headtype == objabi.Hnacl || ctxt.Arch.Family == sys.I386 {
+		if ctxt.Arch.Family == sys.I386 {
 			p.As = ATESTL
 		}
 
@@ -807,12 +760,12 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.From.Offset = int64(autoffset) + int64(ctxt.Arch.RegSize)
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_DI
-		if ctxt.Headtype == objabi.Hnacl || ctxt.Arch.Family == sys.I386 {
+		if ctxt.Arch.Family == sys.I386 {
 			p.As = ALEAL
 		}
 
 		// Set jne branch target.
-		jne.Pcond = p
+		jne.To.SetTarget(p)
 
 		// CMPQ panic_argp(BX), DI
 		p = obj.Appendp(p, newprog)
@@ -822,13 +775,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.From.Offset = 0 // Panic.argp
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_DI
-		if ctxt.Headtype == objabi.Hnacl && ctxt.Arch.Family == sys.AMD64 {
-			p.As = ACMPL
-			p.From.Type = obj.TYPE_MEM
-			p.From.Reg = REG_R15
-			p.From.Scale = 1
-			p.From.Index = REG_BX
-		}
 		if ctxt.Arch.Family == sys.I386 {
 			p.As = ACMPL
 		}
@@ -837,7 +783,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p = obj.Appendp(p, newprog)
 		p.As = AJNE
 		p.To.Type = obj.TYPE_BRANCH
-		p.Pcond = end
+		p.To.SetTarget(end)
 
 		// MOVQ SP, panic_argp(BX)
 		p = obj.Appendp(p, newprog)
@@ -847,13 +793,6 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = REG_BX
 		p.To.Offset = 0 // Panic.argp
-		if ctxt.Headtype == objabi.Hnacl && ctxt.Arch.Family == sys.AMD64 {
-			p.As = AMOVL
-			p.To.Type = obj.TYPE_MEM
-			p.To.Reg = REG_R15
-			p.To.Scale = 1
-			p.To.Index = REG_BX
-		}
 		if ctxt.Arch.Family == sys.I386 {
 			p.As = AMOVL
 		}
@@ -862,13 +801,14 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		p = obj.Appendp(p, newprog)
 		p.As = obj.AJMP
 		p.To.Type = obj.TYPE_BRANCH
-		p.Pcond = end
+		p.To.SetTarget(end)
 
 		// Reset p for following code.
 		p = end
 	}
 
-	for ; p != nil; p = p.Link {
+	var deltasp int32
+	for p = cursym.Func().Text; p != nil; p = p.Link {
 		pcsize := ctxt.Arch.RegSize
 		switch p.From.Name {
 		case obj.NAME_AUTO:
@@ -923,6 +863,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym, newprog obj.ProgAlloc) {
 		case APOPW, APOPFW:
 			deltasp -= 2
 			p.Spadj = -2
+			continue
+
+		case AADJSP:
+			p.Spadj = int32(p.From.Offset)
+			deltasp += int32(p.From.Offset)
 			continue
 
 		case obj.ARET:
@@ -988,14 +933,6 @@ func isZeroArgRuntimeCall(s *obj.LSym) bool {
 }
 
 func indir_cx(ctxt *obj.Link, a *obj.Addr) {
-	if ctxt.Headtype == objabi.Hnacl && ctxt.Arch.Family == sys.AMD64 {
-		a.Type = obj.TYPE_MEM
-		a.Reg = REG_R15
-		a.Index = REG_CX
-		a.Scale = 1
-		return
-	}
-
 	a.Type = obj.TYPE_MEM
 	a.Reg = REG_CX
 }
@@ -1040,7 +977,7 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 	mov := AMOVQ
 	sub := ASUBQ
 
-	if ctxt.Headtype == objabi.Hnacl || ctxt.Arch.Family == sys.I386 {
+	if ctxt.Arch.Family == sys.I386 {
 		cmp = ACMPL
 		lea = ALEAL
 		mov = AMOVL
@@ -1061,6 +998,12 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 		if cursym.CFunc() {
 			p.To.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
 		}
+
+		// Mark the stack bound check and morestack call async nonpreemptible.
+		// If we get preempted here, when resumed the preemption request is
+		// cleared, but we'll still call morestack, which will double the stack
+		// unnecessarily. See issue #35470.
+		p = ctxt.StartUnsafePoint(p, newprog)
 	} else if framesize <= objabi.StackBig {
 		// large stack: SP-framesize <= stackguard-StackSmall
 		//	LEAQ -xxx(SP), AX
@@ -1083,6 +1026,8 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 		if cursym.CFunc() {
 			p.To.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
 		}
+
+		p = ctxt.StartUnsafePoint(p, newprog) // see the comment above
 	} else {
 		// Such a large stack we need to protect against wraparound.
 		// If SP is close to zero:
@@ -1092,11 +1037,11 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 		//
 		// Preemption sets stackguard to StackPreempt, a very large value.
 		// That breaks the math above, so we have to check for that explicitly.
-		//	MOVQ	stackguard, CX
-		//	CMPQ	CX, $StackPreempt
+		//	MOVQ	stackguard, SI
+		//	CMPQ	SI, $StackPreempt
 		//	JEQ	label-of-call-to-morestack
 		//	LEAQ	StackGuard(SP), AX
-		//	SUBQ	CX, AX
+		//	SUBQ	SI, AX
 		//	CMPQ	AX, $(framesize+(StackGuard-StackSmall))
 
 		p = obj.Appendp(p, newprog)
@@ -1109,6 +1054,8 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 		}
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_SI
+
+		p = ctxt.StartUnsafePoint(p, newprog) // see the comment above
 
 		p = obj.Appendp(p, newprog)
 		p.As = cmp
@@ -1153,8 +1100,10 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 	jls.As = AJLS
 	jls.To.Type = obj.TYPE_BRANCH
 
+	end := ctxt.EndUnsafePoint(jls, newprog, -1)
+
 	var last *obj.Prog
-	for last = cursym.Func.Text; last.Link != nil; last = last.Link {
+	for last = cursym.Func().Text; last.Link != nil; last = last.Link {
 	}
 
 	// Now we are at the end of the function, but logically
@@ -1164,10 +1113,11 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 	spfix.As = obj.ANOP
 	spfix.Spadj = -framesize
 
-	pcdata := ctxt.EmitEntryLiveness(cursym, spfix, newprog)
+	pcdata := ctxt.EmitEntryStackMap(cursym, spfix, newprog)
+	pcdata = ctxt.StartUnsafePoint(pcdata, newprog)
 
 	call := obj.Appendp(pcdata, newprog)
-	call.Pos = cursym.Func.Text.Pos
+	call.Pos = cursym.Func().Text.Pos
 	call.As = obj.ACALL
 	call.To.Type = obj.TYPE_BRANCH
 	call.To.Name = obj.NAME_EXTERN
@@ -1175,7 +1125,7 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 	switch {
 	case cursym.CFunc():
 		morestack = "runtime.morestackc"
-	case !cursym.Func.Text.From.Sym.NeedCtxt():
+	case !cursym.Func().Text.From.Sym.NeedCtxt():
 		morestack = "runtime.morestack_noctxt"
 	}
 	call.To.Sym = ctxt.Lookup(morestack)
@@ -1189,25 +1139,29 @@ func stacksplit(ctxt *obj.Link, cursym *obj.LSym, p *obj.Prog, newprog obj.ProgA
 		progedit(ctxt, callend.Link, newprog)
 	}
 
-	jmp := obj.Appendp(callend, newprog)
+	pcdata = ctxt.EndUnsafePoint(callend, newprog, -1)
+
+	jmp := obj.Appendp(pcdata, newprog)
 	jmp.As = obj.AJMP
 	jmp.To.Type = obj.TYPE_BRANCH
-	jmp.Pcond = cursym.Func.Text.Link
+	jmp.To.SetTarget(cursym.Func().Text.Link)
 	jmp.Spadj = +framesize
 
-	jls.Pcond = call
+	jls.To.SetTarget(call)
 	if q1 != nil {
-		q1.Pcond = call
+		q1.To.SetTarget(call)
 	}
 
-	return jls
+	return end
 }
 
 var unaryDst = map[obj.As]bool{
 	ABSWAPL:     true,
 	ABSWAPQ:     true,
+	ACLDEMOTE:   true,
 	ACLFLUSH:    true,
 	ACLFLUSHOPT: true,
+	ACLWB:       true,
 	ACMPXCHG16B: true,
 	ACMPXCHG8B:  true,
 	ADECB:       true,
@@ -1288,16 +1242,6 @@ var unaryDst = map[obj.As]bool{
 
 var Linkamd64 = obj.LinkArch{
 	Arch:           sys.ArchAMD64,
-	Init:           instinit,
-	Preprocess:     preprocess,
-	Assemble:       span6,
-	Progedit:       progedit,
-	UnaryDst:       unaryDst,
-	DWARFRegisters: AMD64DWARFRegisters,
-}
-
-var Linkamd64p32 = obj.LinkArch{
-	Arch:           sys.ArchAMD64P32,
 	Init:           instinit,
 	Preprocess:     preprocess,
 	Assemble:       span6,

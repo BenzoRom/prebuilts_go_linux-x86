@@ -15,7 +15,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"internal/testenv"
-	"io/ioutil"
+	"io"
 	"os"
 	"reflect"
 	"runtime"
@@ -52,7 +52,7 @@ func codeInit() {
 	if err != nil {
 		panic(err)
 	}
-	data, err := ioutil.ReadAll(gz)
+	data, err := io.ReadAll(gz)
 	if err != nil {
 		panic(err)
 	}
@@ -89,7 +89,7 @@ func BenchmarkCodeEncoder(b *testing.B) {
 		b.StartTimer()
 	}
 	b.RunParallel(func(pb *testing.PB) {
-		enc := NewEncoder(ioutil.Discard)
+		enc := NewEncoder(io.Discard)
 		for pb.Next() {
 			if err := enc.Encode(&codeStruct); err != nil {
 				b.Fatal("Encode:", err)
@@ -297,6 +297,22 @@ func BenchmarkIssue10335(b *testing.B) {
 	})
 }
 
+func BenchmarkIssue34127(b *testing.B) {
+	b.ReportAllocs()
+	j := struct {
+		Bar string `json:"bar,string"`
+	}{
+		Bar: `foobar`,
+	}
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := Marshal(&j); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func BenchmarkUnmapped(b *testing.B) {
 	b.ReportAllocs()
 	j := []byte(`{"s": "hello", "y": 2, "o": {"x": 0}, "a": [1, 99, {"x": 1}]}`)
@@ -372,4 +388,23 @@ func BenchmarkTypeFieldsCache(b *testing.B) {
 			})
 		})
 	}
+}
+
+func BenchmarkEncodeMarshaler(b *testing.B) {
+	b.ReportAllocs()
+
+	m := struct {
+		A int
+		B RawMessage
+	}{}
+
+	b.RunParallel(func(pb *testing.PB) {
+		enc := NewEncoder(io.Discard)
+
+		for pb.Next() {
+			if err := enc.Encode(&m); err != nil {
+				b.Fatal("Encode:", err)
+			}
+		}
+	})
 }

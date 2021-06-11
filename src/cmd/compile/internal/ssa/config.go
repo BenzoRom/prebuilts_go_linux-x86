@@ -25,6 +25,8 @@ type Config struct {
 	registers      []Register    // machine registers
 	gpRegMask      regMask       // general purpose integer register mask
 	fpRegMask      regMask       // floating point register mask
+	fp32RegMask    regMask       // floating point register mask
+	fp64RegMask    regMask       // floating point register mask
 	specialRegMask regMask       // special register mask
 	GCRegMap       []*Register   // garbage collector register map, by GC register index
 	FPReg          int8          // register number of frame pointer, -1 if not used
@@ -36,12 +38,11 @@ type Config struct {
 	useSSE         bool          // Use SSE for non-float operations
 	useAvg         bool          // Use optimizations that need Avg* operations
 	useHmul        bool          // Use optimizations that need Hmul* operations
-	nacl           bool          // GOOS=nacl
-	use387         bool          // GO386=387
 	SoftFloat      bool          //
 	Race           bool          // race detector enabled
 	NeedsFpScratch bool          // No direct move between GP and FP register sets
 	BigEndian      bool          //
+	UseFMA         bool          // Use hardware FMA operation
 }
 
 type (
@@ -133,7 +134,7 @@ type Frontend interface {
 	Logger
 
 	// StringData returns a symbol pointing to the given string's contents.
-	StringData(string) interface{} // returns *gc.Sym
+	StringData(string) *obj.LSym
 
 	// Auto returns a Node for an auto variable of the given type.
 	// The SSA compiler uses this function to allocate space for spills.
@@ -148,6 +149,7 @@ type Frontend interface {
 	SplitStruct(LocalSlot, int) LocalSlot
 	SplitArray(LocalSlot) LocalSlot              // array must be length 1
 	SplitInt64(LocalSlot) (LocalSlot, LocalSlot) // returns (hi, lo)
+	SplitSlot(parent *LocalSlot, suffix string, offset int64, t *types.Type) LocalSlot
 
 	// DerefItab dereferences an itab function
 	// entry, given the symbol of the itab and
@@ -171,6 +173,9 @@ type Frontend interface {
 	// SetWBPos indicates that a write barrier has been inserted
 	// in this function at position pos.
 	SetWBPos(pos src.XPos)
+
+	// MyImportPath provides the import name (roughly, the package) for the function being compiled.
+	MyImportPath() string
 }
 
 // interface used to hold a *gc.Node (a stack variable).
@@ -191,6 +196,14 @@ const (
 	ClassParamOut                     // return value
 )
 
+const go116lateCallExpansion = true
+
+// LateCallExpansionEnabledWithin returns true if late call expansion should be tested
+// within compilation of a function/method.
+func LateCallExpansionEnabledWithin(f *Func) bool {
+	return go116lateCallExpansion
+}
+
 // NewConfig returns a new configuration object for the given architecture.
 func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config {
 	c := &Config{arch: arch, Types: types}
@@ -209,19 +222,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.FPReg = framepointerRegAMD64
 		c.LinkReg = linkRegAMD64
 		c.hasGReg = false
-	case "amd64p32":
-		c.PtrSize = 4
-		c.RegSize = 8
-		c.lowerBlock = rewriteBlockAMD64
-		c.lowerValue = rewriteValueAMD64
-		c.splitLoad = rewriteValueAMD64splitload
-		c.registers = registersAMD64[:]
-		c.gpRegMask = gpRegMaskAMD64
-		c.fpRegMask = fpRegMaskAMD64
-		c.FPReg = framepointerRegAMD64
-		c.LinkReg = linkRegAMD64
-		c.hasGReg = false
-		c.noDuffDevice = true
 	case "386":
 		c.PtrSize = 4
 		c.RegSize = 4
@@ -256,7 +256,7 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.FPReg = framepointerRegARM64
 		c.LinkReg = linkRegARM64
 		c.hasGReg = true
-		c.noDuffDevice = objabi.GOOS == "darwin" // darwin linker cannot handle BR26 reloc with non-zero addend
+		c.noDuffDevice = objabi.GOOS == "darwin" || objabi.GOOS == "ios" // darwin linker cannot handle BR26 reloc with non-zero addend
 	case "ppc64":
 		c.BigEndian = true
 		fallthrough
@@ -316,6 +316,16 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.LinkReg = linkRegMIPS
 		c.hasGReg = true
 		c.noDuffDevice = true
+	case "riscv64":
+		c.PtrSize = 8
+		c.RegSize = 8
+		c.lowerBlock = rewriteBlockRISCV64
+		c.lowerValue = rewriteValueRISCV64
+		c.registers = registersRISCV64[:]
+		c.gpRegMask = gpRegMaskRISCV64
+		c.fpRegMask = fpRegMaskRISCV64
+		c.FPReg = framepointerRegRISCV64
+		c.hasGReg = true
 	case "wasm":
 		c.PtrSize = 8
 		c.RegSize = 8
@@ -324,6 +334,8 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 		c.registers = registersWasm[:]
 		c.gpRegMask = gpRegMaskWasm
 		c.fpRegMask = fpRegMaskWasm
+		c.fp32RegMask = fp32RegMaskWasm
+		c.fp64RegMask = fp64RegMaskWasm
 		c.FPReg = framepointerRegWasm
 		c.LinkReg = linkRegWasm
 		c.hasGReg = true
@@ -335,25 +347,19 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 	}
 	c.ctxt = ctxt
 	c.optimize = optimize
-	c.nacl = objabi.GOOS == "nacl"
 	c.useSSE = true
+	c.UseFMA = true
 
-	// Don't use Duff's device nor SSE on Plan 9 AMD64, because
-	// floating point operations are not allowed in note handler.
-	if objabi.GOOS == "plan9" && arch == "amd64" {
-		c.noDuffDevice = true
-		c.useSSE = false
-	}
+	// On Plan 9, floating point operations are not allowed in note handler.
+	if objabi.GOOS == "plan9" {
+		// Don't use FMA on Plan 9
+		c.UseFMA = false
 
-	if c.nacl {
-		c.noDuffDevice = true // Don't use Duff's device on NaCl
-
-		// Returns clobber BP on nacl/386, so the write
-		// barrier does.
-		opcodeTable[Op386LoweredWB].reg.clobbers |= 1 << 5 // BP
-
-		// ... and SI on nacl/amd64.
-		opcodeTable[OpAMD64LoweredWB].reg.clobbers |= 1 << 6 // SI
+		// Don't use Duff's device and SSE on Plan 9 AMD64.
+		if arch == "amd64" {
+			c.noDuffDevice = true
+			c.useSSE = false
+		}
 	}
 
 	if ctxt.Flag_shared {
@@ -379,11 +385,6 @@ func NewConfig(arch string, types Types, ctxt *obj.Link, optimize bool) *Config 
 	}
 
 	return c
-}
-
-func (c *Config) Set387(b bool) {
-	c.NeedsFpScratch = b
-	c.use387 = b
 }
 
 func (c *Config) Ctxt() *obj.Link { return c.ctxt }

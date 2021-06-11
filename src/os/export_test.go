@@ -9,4 +9,5 @@ package os
 var Atime = atime
 var LstatP = &lstat
 var ErrWriteAtInAppendMode = errWriteAtInAppendMode
-var RemoveAllTestHook = &removeAllTestHook
+var TestingForceReadDirLstat = &testingForceReadDirLstat
+var ErrPatternHasSeparator = errPatternHasSeparator

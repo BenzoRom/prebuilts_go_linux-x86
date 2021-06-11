@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build !nacl
-
 package main_test
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"testing"
 
 	"cmd/go/internal/help"
@@ -16,6 +14,8 @@ import (
 )
 
 func TestDocsUpToDate(t *testing.T) {
+	t.Parallel()
+
 	if !modload.Enabled() {
 		t.Skipf("help.Help in GOPATH mode is configured by main.main")
 	}
@@ -23,7 +23,7 @@ func TestDocsUpToDate(t *testing.T) {
 	buf := new(bytes.Buffer)
 	// Match the command in mkalldocs.sh that generates alldocs.go.
 	help.Help(buf, []string{"documentation"})
-	data, err := ioutil.ReadFile("alldocs.go")
+	data, err := os.ReadFile("alldocs.go")
 	if err != nil {
 		t.Fatalf("error reading alldocs.go: %v", err)
 	}

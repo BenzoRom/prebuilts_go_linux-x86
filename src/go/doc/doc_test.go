@@ -8,10 +8,11 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -65,7 +66,7 @@ func indentFmt(indent, s string) string {
 	return indent + strings.ReplaceAll(s, "\n", "\n"+indent) + end
 }
 
-func isGoFile(fi os.FileInfo) bool {
+func isGoFile(fi fs.FileInfo) bool {
 	name := fi.Name()
 	return !fi.IsDir() &&
 		len(name) > 0 && name[0] != '.' && // ignore .files
@@ -85,7 +86,7 @@ func test(t *testing.T, mode Mode) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		filter = func(fi os.FileInfo) bool {
+		filter = func(fi fs.FileInfo) bool {
 			return isGoFile(fi) && rx.MatchString(fi.Name())
 		}
 	}
@@ -99,8 +100,16 @@ func test(t *testing.T, mode Mode) {
 
 	// test packages
 	for _, pkg := range pkgs {
-		importpath := dataDir + "/" + pkg.Name
-		doc := New(pkg, importpath, mode)
+		importPath := dataDir + "/" + pkg.Name
+		var files []*ast.File
+		for _, f := range pkg.Files {
+			files = append(files, f)
+		}
+		doc, err := NewFromFiles(fset, files, importPath, mode)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
 
 		// golden files always use / in filenames - canonicalize them
 		for i, filename := range doc.Filenames {
@@ -118,7 +127,7 @@ func test(t *testing.T, mode Mode) {
 		// update golden file if necessary
 		golden := filepath.Join(dataDir, fmt.Sprintf("%s.%d.golden", pkg.Name, mode))
 		if *update {
-			err := ioutil.WriteFile(golden, got, 0644)
+			err := os.WriteFile(golden, got, 0644)
 			if err != nil {
 				t.Error(err)
 			}
@@ -126,7 +135,7 @@ func test(t *testing.T, mode Mode) {
 		}
 
 		// get golden file
-		want, err := ioutil.ReadFile(golden)
+		want, err := os.ReadFile(golden)
 		if err != nil {
 			t.Error(err)
 			continue

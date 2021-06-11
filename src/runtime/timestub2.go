@@ -2,11 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build !darwin
-// +build !windows
-// +build !freebsd
 // +build !aix
+// +build !darwin
+// +build !freebsd
+// +build !openbsd
+// +build !solaris
+// +build !windows
 
 package runtime
 
-func walltime() (sec int64, nsec int32)
+func walltime1() (sec int64, nsec int32)

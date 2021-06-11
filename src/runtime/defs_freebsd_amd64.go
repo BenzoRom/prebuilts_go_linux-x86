@@ -13,8 +13,14 @@ const (
 )
 
 const (
-	_EINTR  = 0x4
-	_EFAULT = 0xe
+	_EINTR     = 0x4
+	_EFAULT    = 0xe
+	_EAGAIN    = 0x23
+	_ENOSYS    = 0x4e
+	_ETIMEDOUT = 0x3c
+
+	_O_NONBLOCK = 0x4
+	_O_CLOEXEC  = 0x100000
 
 	_PROT_NONE  = 0x0
 	_PROT_READ  = 0x1
@@ -121,6 +127,8 @@ type thrparam struct {
 	rtp        *rtprio
 	spare      [3]uintptr
 }
+
+type thread int64 // long
 
 type sigset struct {
 	__bits [4]uint32

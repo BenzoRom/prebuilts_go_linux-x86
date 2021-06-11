@@ -60,6 +60,12 @@ func init() {
 	}
 }
 
+func CondSkipHTTP2(t *testing.T) {
+	if omitBundledHTTP2 {
+		t.Skip("skipping HTTP/2 test when nethttpomithttp2 build tag in use")
+	}
+}
+
 var (
 	SetEnterRoundTripHook = hookSetter(&testHookEnterRoundTrip)
 	SetRoundTripRetried   = hookSetter(&testHookRoundTripRetried)
@@ -208,6 +214,30 @@ func (t *Transport) PutIdleTestConn(scheme, addr string) bool {
 	}) == nil
 }
 
+// PutIdleTestConnH2 reports whether it was able to insert a fresh
+// HTTP/2 persistConn for scheme, addr into the idle connection pool.
+func (t *Transport) PutIdleTestConnH2(scheme, addr string, alt RoundTripper) bool {
+	key := connectMethodKey{"", scheme, addr, false}
+
+	if t.MaxConnsPerHost > 0 {
+		// Transport is tracking conns-per-host.
+		// Increment connection count to account
+		// for new persistConn created below.
+		t.connsPerHostMu.Lock()
+		if t.connsPerHost == nil {
+			t.connsPerHost = make(map[connectMethodKey]int)
+		}
+		t.connsPerHost[key]++
+		t.connsPerHostMu.Unlock()
+	}
+
+	return t.tryPutIdleConn(&persistConn{
+		t:        t,
+		alt:      alt,
+		cacheKey: key,
+	}) == nil
+}
+
 // All test hooks must be non-nil so they can be called directly,
 // but the tests use nil to mean hook disabled.
 func unnilTestHook(f *func()) {
@@ -224,7 +254,7 @@ func hookSetter(dst *func()) func(func()) {
 }
 
 func ExportHttp2ConfigureTransport(t *Transport) error {
-	t2, err := http2configureTransport(t)
+	t2, err := http2configureTransports(t)
 	if err != nil {
 		return err
 	}
@@ -242,6 +272,17 @@ func (s *Server) ExportAllConnsIdle() bool {
 		}
 	}
 	return true
+}
+
+func (s *Server) ExportAllConnsByState() map[ConnState]int {
+	states := map[ConnState]int{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for c := range s.activeConn {
+		st, _ := c.getState()
+		states[st] += 1
+	}
+	return states
 }
 
 func (r *Request) WithT(t *testing.T) *Request {

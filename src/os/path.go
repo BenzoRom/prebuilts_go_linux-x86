@@ -22,7 +22,7 @@ func MkdirAll(path string, perm FileMode) error {
 		if dir.IsDir() {
 			return nil
 		}
-		return &PathError{"mkdir", path, syscall.ENOTDIR}
+		return &PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
 	}
 
 	// Slow path: make sure parent exists and then call Mkdir for path.
@@ -57,9 +57,6 @@ func MkdirAll(path string, perm FileMode) error {
 	}
 	return nil
 }
-
-// removeAllTestHook is a hook for testing.
-var removeAllTestHook = func(err error) error { return err }
 
 // RemoveAll removes path and any children it contains.
 // It removes everything it can but returns the first error

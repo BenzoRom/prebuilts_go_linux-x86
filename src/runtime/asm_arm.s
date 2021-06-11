@@ -185,14 +185,10 @@ GLOBL	runtime·mainPC(SB),RODATA,$4
 TEXT runtime·breakpoint(SB),NOSPLIT,$0-0
 	// gdb won't skip this breakpoint instruction automatically,
 	// so you must manually "set $pc+=4" to skip it and continue.
-#ifdef GOOS_nacl
-	WORD	$0xe125be7f	// BKPT 0x5bef, NACL_INSTR_ARM_BREAKPOINT
-#else
 #ifdef GOOS_plan9
 	WORD	$0xD1200070	// undefined instruction used as armv5 breakpoint in Plan 9
 #else
 	WORD	$0xe7f001f0	// undefined instruction that gdb understands is a software breakpoint
-#endif
 #endif
 	RET
 
@@ -327,9 +323,6 @@ switch:
 	// save our state in g->sched. Pretend to
 	// be systemstack_switch if the G stack is scanned.
 	MOVW	$runtime·systemstack_switch(SB), R3
-#ifdef GOOS_nacl
-	ADD	$4, R3, R3 // get past nacl-insert bic instruction
-#endif
 	ADD	$4, R3, R3 // get past push {lr}
 	MOVW	R3, (g_sched+gobuf_pc)(g)
 	MOVW	R13, (g_sched+gobuf_sp)(g)
@@ -650,25 +643,9 @@ nosave:
 	MOVW	R0, ret+8(FP)
 	RET
 
-// cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
-// Turn the fn into a Go func (by taking its address) and call
-// cgocallback_gofunc.
-TEXT runtime·cgocallback(SB),NOSPLIT,$16-16
-	MOVW	$fn+0(FP), R0
-	MOVW	R0, 4(R13)
-	MOVW	frame+4(FP), R0
-	MOVW	R0, 8(R13)
-	MOVW	framesize+8(FP), R0
-	MOVW	R0, 12(R13)
-	MOVW	ctxt+12(FP), R0
-	MOVW	R0, 16(R13)
-	MOVW	$runtime·cgocallback_gofunc(SB), R0
-	BL	(R0)
-	RET
-
-// cgocallback_gofunc(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
+// cgocallback(fn, frame unsafe.Pointer, ctxt uintptr)
 // See cgocall.go for more details.
-TEXT	·cgocallback_gofunc(SB),NOSPLIT,$8-16
+TEXT	·cgocallback(SB),NOSPLIT,$12-12
 	NO_LOCAL_POINTERS
 
 	// Load m and g from thread-local storage.
@@ -693,7 +670,7 @@ needm:
 	MOVW	$runtime·needm(SB), R0
 	BL	(R0)
 
-	// Set m->sched.sp = SP, so that if a panic happens
+	// Set m->g0->sched.sp = SP, so that if a panic happens
 	// during the function we are about to execute, it will
 	// have a valid SP to run on the g0 stack.
 	// The next few lines (after the havem label)
@@ -713,10 +690,10 @@ havem:
 	// Save current m->g0->sched.sp on stack and then set it to SP.
 	// Save current sp in m->g0->sched.sp in preparation for
 	// switch back to m->curg stack.
-	// NOTE: unwindm knows that the saved g->sched.sp is at 4(R13) aka savedsp-8(SP).
+	// NOTE: unwindm knows that the saved g->sched.sp is at 4(R13) aka savedsp-12(SP).
 	MOVW	m_g0(R8), R3
 	MOVW	(g_sched+gobuf_sp)(R3), R4
-	MOVW	R4, savedsp-8(SP)
+	MOVW	R4, savedsp-12(SP)	// must match frame size
 	MOVW	R13, (g_sched+gobuf_sp)(R3)
 
 	// Switch to m->curg stack and call runtime.cgocallbackg.
@@ -725,30 +702,30 @@ havem:
 	// save that information (m->curg->sched) so we can restore it.
 	// We can restore m->curg->sched.sp easily, because calling
 	// runtime.cgocallbackg leaves SP unchanged upon return.
-	// To save m->curg->sched.pc, we push it onto the stack.
-	// This has the added benefit that it looks to the traceback
-	// routine like cgocallbackg is going to return to that
-	// PC (because the frame we allocate below has the same
-	// size as cgocallback_gofunc's frame declared above)
-	// so that the traceback will seamlessly trace back into
-	// the earlier calls.
-	//
-	// In the new goroutine, -4(SP) is unused (where SP refers to
-	// m->curg's SP while we're setting it up, before we've adjusted it).
+	// To save m->curg->sched.pc, we push it onto the curg stack and
+	// open a frame the same size as cgocallback's g0 frame.
+	// Once we switch to the curg stack, the pushed PC will appear
+	// to be the return PC of cgocallback, so that the traceback
+	// will seamlessly trace back into the earlier calls.
 	MOVW	m_curg(R8), R0
 	BL	setg<>(SB)
 	MOVW	(g_sched+gobuf_sp)(g), R4 // prepare stack as R4
 	MOVW	(g_sched+gobuf_pc)(g), R5
-	MOVW	R5, -12(R4)
-	MOVW	ctxt+12(FP), R0
-	MOVW	R0, -8(R4)
-	MOVW	$-12(R4), R13
+	MOVW	R5, -(12+4)(R4)	// "saved LR"; must match frame size
+	// Gather our arguments into registers.
+	MOVW	fn+0(FP), R1
+	MOVW	frame+4(FP), R2
+	MOVW	ctxt+8(FP), R3
+	MOVW	$-(12+4)(R4), R13	// switch stack; must match frame size
+	MOVW	R1, 4(R13)
+	MOVW	R2, 8(R13)
+	MOVW	R3, 12(R13)
 	BL	runtime·cgocallbackg(SB)
 
 	// Restore g->sched (== m->curg->sched) from saved values.
 	MOVW	0(R13), R5
 	MOVW	R5, (g_sched+gobuf_pc)(g)
-	MOVW	$12(R13), R4
+	MOVW	$(12+4)(R13), R4	// must match frame size
 	MOVW	R4, (g_sched+gobuf_sp)(g)
 
 	// Switch back to m->g0's stack and restore m->g0->sched.sp.
@@ -758,7 +735,7 @@ havem:
 	MOVW	m_g0(R8), R0
 	BL	setg<>(SB)
 	MOVW	(g_sched+gobuf_sp)(g), R13
-	MOVW	savedsp-8(SP), R4
+	MOVW	savedsp-12(SP), R4	// must match frame size
 	MOVW	R4, (g_sched+gobuf_sp)(g)
 
 	// If the m on entry was nil, we called needm above to borrow an m
@@ -817,18 +794,14 @@ TEXT runtime·armPublicationBarrier(SB),NOSPLIT|NOFRAME,$0-0
 	RET
 
 // AES hashing not implemented for ARM
-TEXT runtime·aeshash(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshash32(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshash64(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
-TEXT runtime·aeshashstr(SB),NOSPLIT|NOFRAME,$0-0
-	MOVW	$0, R0
-	MOVW	(R0), R1
+TEXT runtime·memhash(SB),NOSPLIT|NOFRAME,$0-16
+	JMP	runtime·memhashFallback(SB)
+TEXT runtime·strhash(SB),NOSPLIT|NOFRAME,$0-12
+	JMP	runtime·strhashFallback(SB)
+TEXT runtime·memhash32(SB),NOSPLIT|NOFRAME,$0-12
+	JMP	runtime·memhash32Fallback(SB)
+TEXT runtime·memhash64(SB),NOSPLIT|NOFRAME,$0-12
+	JMP	runtime·memhash64Fallback(SB)
 
 TEXT runtime·return0(SB),NOSPLIT,$0
 	MOVW	$0, R0
@@ -891,7 +864,6 @@ TEXT runtime·usplitR0(SB),NOSPLIT,$0
 	SUB	R1, R3, R1
 	RET
 
-#ifndef GOOS_nacl
 // This is called from .init_array and follows the platform, not Go, ABI.
 TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
 	MOVW	R9, saver9-4(SP) // The access to global variables below implicitly uses R9, which is callee-save
@@ -902,7 +874,6 @@ TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
 	MOVW	saver11-8(SP), R11
 	MOVW	saver9-4(SP), R9
 	RET
-#endif
 
 TEXT ·checkASM(SB),NOSPLIT,$0-1
 	MOVW	$1, R3
@@ -939,8 +910,6 @@ ret:
 	MOVM.IA.W	(R13), [R0,R1]
 	// Do the write.
 	MOVW	R3, (R2)
-	// Normally RET on nacl clobbers R12, but because this
-	// function has no frame it doesn't have to usual epilogue.
 	RET
 
 flush:

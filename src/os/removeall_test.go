@@ -5,9 +5,8 @@
 package os_test
 
 import (
-	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	. "os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +15,7 @@ import (
 )
 
 func TestRemoveAll(t *testing.T) {
-	tmpDir, err := ioutil.TempDir("", "TestRemoveAll-")
+	tmpDir, err := os.MkdirTemp("", "TestRemoveAll-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +128,7 @@ func TestRemoveAllLarge(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	tmpDir, err := ioutil.TempDir("", "TestRemoveAll-")
+	tmpDir, err := os.MkdirTemp("", "TestRemoveAll-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +158,7 @@ func TestRemoveAllLarge(t *testing.T) {
 
 func TestRemoveAllLongPath(t *testing.T) {
 	switch runtime.GOOS {
-	case "aix", "darwin", "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "illumos", "solaris":
+	case "aix", "darwin", "ios", "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "illumos", "solaris":
 		break
 	default:
 		t.Skip("skipping for not implemented platforms")
@@ -170,7 +169,7 @@ func TestRemoveAllLongPath(t *testing.T) {
 		t.Fatalf("Could not get wd: %s", err)
 	}
 
-	startPath, err := ioutil.TempDir("", "TestRemoveAllLongPath-")
+	startPath, err := os.MkdirTemp("", "TestRemoveAllLongPath-")
 	if err != nil {
 		t.Fatalf("Could not create TempDir: %s", err)
 	}
@@ -212,7 +211,7 @@ func TestRemoveAllDot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Could not get wd: %s", err)
 	}
-	tempDir, err := ioutil.TempDir("", "TestRemoveAllDot-")
+	tempDir, err := os.MkdirTemp("", "TestRemoveAllDot-")
 	if err != nil {
 		t.Fatalf("Could not create TempDir: %s", err)
 	}
@@ -237,7 +236,7 @@ func TestRemoveAllDot(t *testing.T) {
 func TestRemoveAllDotDot(t *testing.T) {
 	t.Parallel()
 
-	tempDir, err := ioutil.TempDir("", "TestRemoveAllDotDot-")
+	tempDir, err := os.MkdirTemp("", "TestRemoveAllDotDot-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +261,7 @@ func TestRemoveAllDotDot(t *testing.T) {
 func TestRemoveReadOnlyDir(t *testing.T) {
 	t.Parallel()
 
-	tempDir, err := ioutil.TempDir("", "TestRemoveReadOnlyDir-")
+	tempDir, err := os.MkdirTemp("", "TestRemoveReadOnlyDir-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +288,7 @@ func TestRemoveReadOnlyDir(t *testing.T) {
 // Issue #29983.
 func TestRemoveAllButReadOnlyAndPathError(t *testing.T) {
 	switch runtime.GOOS {
-	case "nacl", "js", "windows":
+	case "js", "windows":
 		t.Skipf("skipping test on %s", runtime.GOOS)
 	}
 
@@ -299,7 +298,7 @@ func TestRemoveAllButReadOnlyAndPathError(t *testing.T) {
 
 	t.Parallel()
 
-	tempDir, err := ioutil.TempDir("", "TestRemoveAllButReadOnly-")
+	tempDir, err := os.MkdirTemp("", "TestRemoveAllButReadOnly-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,11 +355,12 @@ func TestRemoveAllButReadOnlyAndPathError(t *testing.T) {
 	// The error should be of type *PathError.
 	// see issue 30491 for details.
 	if pathErr, ok := err.(*PathError); ok {
-		if g, w := pathErr.Path, filepath.Join(tempDir, "b", "y"); g != w {
-			t.Errorf("got %q, expected pathErr.path %q", g, w)
+		want := filepath.Join(tempDir, "b", "y")
+		if pathErr.Path != want {
+			t.Errorf("RemoveAll(%q): err.Path=%q, want %q", tempDir, pathErr.Path, want)
 		}
 	} else {
-		t.Errorf("got %T, expected *os.PathError", err)
+		t.Errorf("RemoveAll(%q): error has type %T, want *fs.PathError", tempDir, err)
 	}
 
 	for _, dir := range dirs {
@@ -379,7 +379,7 @@ func TestRemoveAllButReadOnlyAndPathError(t *testing.T) {
 
 func TestRemoveUnreadableDir(t *testing.T) {
 	switch runtime.GOOS {
-	case "nacl", "js", "windows":
+	case "js":
 		t.Skipf("skipping test on %s", runtime.GOOS)
 	}
 
@@ -389,7 +389,7 @@ func TestRemoveUnreadableDir(t *testing.T) {
 
 	t.Parallel()
 
-	tempDir, err := ioutil.TempDir("", "TestRemoveAllButReadOnly-")
+	tempDir, err := os.MkdirTemp("", "TestRemoveAllButReadOnly-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,15 +413,7 @@ func TestRemoveAllWithMoreErrorThanReqSize(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	defer func(oldHook func(error) error) {
-		*RemoveAllTestHook = oldHook
-	}(*RemoveAllTestHook)
-
-	*RemoveAllTestHook = func(err error) error {
-		return errors.New("error from RemoveAllTestHook")
-	}
-
-	tmpDir, err := ioutil.TempDir("", "TestRemoveAll-")
+	tmpDir, err := os.MkdirTemp("", "TestRemoveAll-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +421,7 @@ func TestRemoveAllWithMoreErrorThanReqSize(t *testing.T) {
 
 	path := filepath.Join(tmpDir, "_TestRemoveAllWithMoreErrorThanReqSize_")
 
-	// Make directory with 1025 files and remove.
+	// Make directory with 1025 read-only files.
 	if err := MkdirAll(path, 0777); err != nil {
 		t.Fatalf("MkdirAll %q: %s", path, err)
 	}
@@ -442,13 +434,38 @@ func TestRemoveAllWithMoreErrorThanReqSize(t *testing.T) {
 		fd.Close()
 	}
 
-	// This call should not hang
-	if err := RemoveAll(path); err == nil {
-		t.Fatal("Want error from RemoveAllTestHook, got nil")
+	// Make the parent directory read-only. On some platforms, this is what
+	// prevents os.Remove from removing the files within that directory.
+	if err := Chmod(path, 0555); err != nil {
+		t.Fatal(err)
+	}
+	defer Chmod(path, 0755)
+
+	// This call should not hang, even on a platform that disallows file deletion
+	// from read-only directories.
+	err = RemoveAll(path)
+
+	if Getuid() == 0 {
+		// On many platforms, root can remove files from read-only directories.
+		return
+	}
+	if err == nil {
+		if runtime.GOOS == "windows" {
+			// Marking a directory as read-only in Windows does not prevent the RemoveAll
+			// from creating or removing files within it.
+			return
+		}
+		t.Fatal("RemoveAll(<read-only directory>) = nil; want error")
 	}
 
-	// We hook to inject error, but the actual files must be deleted
-	if _, err := Lstat(path); err == nil {
-		t.Fatal("directory must be deleted even with removeAllTetHook run")
+	dir, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+
+	names, _ := dir.Readdirnames(1025)
+	if len(names) < 1025 {
+		t.Fatalf("RemoveAll(<read-only directory>) unexpectedly removed %d read-only files from that directory", 1025-len(names))
 	}
 }

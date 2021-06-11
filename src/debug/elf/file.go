@@ -628,6 +628,16 @@ func (f *File) applyRelocations(dst []byte, rels []byte) error {
 	}
 }
 
+// canApplyRelocation reports whether we should try to apply a
+// relocation to a DWARF data section, given a pointer to the symbol
+// targeted by the relocation.
+// Most relocations in DWARF data tend to be section-relative, but
+// some target non-section symbols (for example, low_PC attrs on
+// subprogram or compilation unit DIEs that target function symbols).
+func canApplyRelocation(sym *Symbol) bool {
+	return sym.Section != SHN_UNDEF && sym.Section < SHN_LORESERVE
+}
+
 func (f *File) applyRelocationsAMD64(dst []byte, rels []byte) error {
 	// 24 is the size of Rela64.
 	if len(rels)%24 != 0 {
@@ -651,26 +661,27 @@ func (f *File) applyRelocationsAMD64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
 		// There are relocations, so this must be a normal
-		// object file, and we only look at section symbols,
-		// so we assume that the symbol value is 0.
+		// object file.  The code below handles only basic relocations
+		// of the form S + A (symbol plus addend).
 
 		switch t {
 		case R_X86_64_64:
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], uint64(rela.Addend))
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_X86_64_32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -775,26 +786,27 @@ func (f *File) applyRelocationsARM64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
 		// There are relocations, so this must be a normal
-		// object file, and we only look at section symbols,
-		// so we assume that the symbol value is 0.
+		// object file.  The code below handles only basic relocations
+		// of the form S + A (symbol plus addend).
 
 		switch t {
 		case R_AARCH64_ABS64:
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], uint64(rela.Addend))
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_AARCH64_ABS32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -824,8 +836,7 @@ func (f *File) applyRelocationsPPC(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -834,7 +845,8 @@ func (f *File) applyRelocationsPPC(dst []byte, rels []byte) error {
 			if rela.Off+4 >= uint32(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -864,8 +876,7 @@ func (f *File) applyRelocationsPPC64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -874,12 +885,14 @@ func (f *File) applyRelocationsPPC64(dst []byte, rels []byte) error {
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], uint64(rela.Addend))
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_PPC64_ADDR32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -954,8 +967,7 @@ func (f *File) applyRelocationsMIPS64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -964,12 +976,14 @@ func (f *File) applyRelocationsMIPS64(dst []byte, rels []byte) error {
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], uint64(rela.Addend))
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_MIPS_32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -999,10 +1013,7 @@ func (f *File) applyRelocationsRISCV64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		switch SymType(sym.Info & 0xf) {
-		case STT_SECTION, STT_NOTYPE:
-			break
-		default:
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -1011,14 +1022,14 @@ func (f *File) applyRelocationsRISCV64(dst []byte, rels []byte) error {
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			val := sym.Value + uint64(rela.Addend)
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val)
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_RISCV_32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			val := uint32(sym.Value) + uint32(rela.Addend)
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val)
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -1048,10 +1059,7 @@ func (f *File) applyRelocationss390x(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		switch SymType(sym.Info & 0xf) {
-		case STT_SECTION, STT_NOTYPE:
-			break
-		default:
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -1060,14 +1068,14 @@ func (f *File) applyRelocationss390x(dst []byte, rels []byte) error {
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			val := sym.Value + uint64(rela.Addend)
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val)
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_390_32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			val := uint32(sym.Value) + uint32(rela.Addend)
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val)
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -1097,8 +1105,7 @@ func (f *File) applyRelocationsSPARC64(dst []byte, rels []byte) error {
 			continue
 		}
 		sym := &symbols[symNo-1]
-		if SymType(sym.Info&0xf) != STT_SECTION {
-			// We don't handle non-section relocations for now.
+		if !canApplyRelocation(sym) {
 			continue
 		}
 
@@ -1107,12 +1114,14 @@ func (f *File) applyRelocationsSPARC64(dst []byte, rels []byte) error {
 			if rela.Off+8 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], uint64(rela.Addend))
+			val64 := sym.Value + uint64(rela.Addend)
+			f.ByteOrder.PutUint64(dst[rela.Off:rela.Off+8], val64)
 		case R_SPARC_32, R_SPARC_UA32:
 			if rela.Off+4 >= uint64(len(dst)) || rela.Addend < 0 {
 				continue
 			}
-			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], uint32(rela.Addend))
+			val32 := uint32(sym.Value) + uint32(rela.Addend)
+			f.ByteOrder.PutUint32(dst[rela.Off:rela.Off+4], val32)
 		}
 	}
 
@@ -1174,9 +1183,8 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 		return b, nil
 	}
 
-	// There are many other DWARF sections, but these
-	// are the ones the debug/dwarf package uses.
-	// Don't bother loading others.
+	// There are many DWARf sections, but these are the ones
+	// the debug/dwarf package started with.
 	var dat = map[string][]byte{"abbrev": nil, "info": nil, "str": nil, "line": nil, "ranges": nil}
 	for i, s := range f.Sections {
 		suffix := dwarfSuffix(s)
@@ -1198,10 +1206,14 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 		return nil, err
 	}
 
-	// Look for DWARF4 .debug_types sections.
+	// Look for DWARF4 .debug_types sections and DWARF5 sections.
 	for i, s := range f.Sections {
 		suffix := dwarfSuffix(s)
-		if suffix != "types" {
+		if suffix == "" {
+			continue
+		}
+		if _, ok := dat[suffix]; ok {
+			// Already handled.
 			continue
 		}
 
@@ -1210,9 +1222,14 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 			return nil, err
 		}
 
-		err = d.AddTypes(fmt.Sprintf("types-%d", i), b)
-		if err != nil {
-			return nil, err
+		if suffix == "types" {
+			if err := d.AddTypes(fmt.Sprintf("types-%d", i), b); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := d.AddSection(".debug_"+suffix, b); err != nil {
+				return nil, err
+			}
 		}
 	}
 

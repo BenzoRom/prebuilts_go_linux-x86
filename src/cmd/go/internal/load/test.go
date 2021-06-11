@@ -6,8 +6,7 @@ package load
 
 import (
 	"bytes"
-	"cmd/go/internal/base"
-	"cmd/go/internal/str"
+	"context"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -21,11 +20,15 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"cmd/go/internal/str"
+	"cmd/go/internal/trace"
 )
 
 var TestMainDeps = []string{
 	// Dependencies for testmain.
 	"os",
+	"reflect",
 	"testing",
 	"testing/internal/testdeps",
 }
@@ -42,8 +45,8 @@ type TestCover struct {
 // TestPackagesFor is like TestPackagesAndErrors but it returns
 // an error if the test packages or their dependencies have errors.
 // Only test packages without errors are returned.
-func TestPackagesFor(p *Package, cover *TestCover) (pmain, ptest, pxtest *Package, err error) {
-	pmain, ptest, pxtest = TestPackagesAndErrors(p, cover)
+func TestPackagesFor(ctx context.Context, p *Package, cover *TestCover) (pmain, ptest, pxtest *Package, err error) {
+	pmain, ptest, pxtest = TestPackagesAndErrors(ctx, p, cover)
 	for _, p1 := range []*Package{ptest, pxtest, pmain} {
 		if p1 == nil {
 			// pxtest may be nil
@@ -55,7 +58,6 @@ func TestPackagesFor(p *Package, cover *TestCover) (pmain, ptest, pxtest *Packag
 		}
 		if len(p1.DepsErrors) > 0 {
 			perr := p1.DepsErrors[0]
-			perr.Pos = "" // show full import stack
 			err = perr
 			break
 		}
@@ -90,7 +92,10 @@ func TestPackagesFor(p *Package, cover *TestCover) (pmain, ptest, pxtest *Packag
 //
 // The caller is expected to have checked that len(p.TestGoFiles)+len(p.XTestGoFiles) > 0,
 // or else there's no point in any of this.
-func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *Package) {
+func TestPackagesAndErrors(ctx context.Context, p *Package, cover *TestCover) (pmain, ptest, pxtest *Package) {
+	ctx, span := trace.StartSpan(ctx, "load.TestPackagesAndErrors")
+	defer span.Done()
+
 	pre := newPreload()
 	defer pre.flush()
 	allImports := append([]string{}, p.TestImports...)
@@ -100,35 +105,56 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 	var ptestErr, pxtestErr *PackageError
 	var imports, ximports []*Package
 	var stk ImportStack
+	var testEmbed, xtestEmbed map[string][]string
 	stk.Push(p.ImportPath + " (test)")
 	rawTestImports := str.StringList(p.TestImports)
 	for i, path := range p.TestImports {
-		p1 := loadImport(pre, path, p.Dir, p, &stk, p.Internal.Build.TestImportPos[path], ResolveImport)
+		p1 := loadImport(ctx, pre, path, p.Dir, p, &stk, p.Internal.Build.TestImportPos[path], ResolveImport)
 		if str.Contains(p1.Deps, p.ImportPath) || p1.ImportPath == p.ImportPath {
 			// Same error that loadPackage returns (via reusePackage) in pkg.go.
 			// Can't change that code, because that code is only for loading the
 			// non-test copy of a package.
 			ptestErr = &PackageError{
 				ImportStack:   testImportStack(stk[0], p1, p.ImportPath),
-				Err:           "import cycle not allowed in test",
+				Err:           errors.New("import cycle not allowed in test"),
 				IsImportCycle: true,
 			}
 		}
 		p.TestImports[i] = p1.ImportPath
 		imports = append(imports, p1)
 	}
+	var err error
+	p.TestEmbedFiles, testEmbed, err = resolveEmbed(p.Dir, p.TestEmbedPatterns)
+	if err != nil && ptestErr == nil {
+		ptestErr = &PackageError{
+			ImportStack: stk.Copy(),
+			Err:         err,
+		}
+		embedErr := err.(*EmbedError)
+		ptestErr.setPos(p.Internal.Build.TestEmbedPatternPos[embedErr.Pattern])
+	}
 	stk.Pop()
+
 	stk.Push(p.ImportPath + "_test")
 	pxtestNeedsPtest := false
 	rawXTestImports := str.StringList(p.XTestImports)
 	for i, path := range p.XTestImports {
-		p1 := loadImport(pre, path, p.Dir, p, &stk, p.Internal.Build.XTestImportPos[path], ResolveImport)
+		p1 := loadImport(ctx, pre, path, p.Dir, p, &stk, p.Internal.Build.XTestImportPos[path], ResolveImport)
 		if p1.ImportPath == p.ImportPath {
 			pxtestNeedsPtest = true
 		} else {
 			ximports = append(ximports, p1)
 		}
 		p.XTestImports[i] = p1.ImportPath
+	}
+	p.XTestEmbedFiles, xtestEmbed, err = resolveEmbed(p.Dir, p.XTestEmbedPatterns)
+	if err != nil && pxtestErr == nil {
+		pxtestErr = &PackageError{
+			ImportStack: stk.Copy(),
+			Err:         err,
+		}
+		embedErr := err.(*EmbedError)
+		pxtestErr.setPos(p.Internal.Build.XTestEmbedPatternPos[embedErr.Pattern])
 	}
 	stk.Pop()
 
@@ -169,6 +195,14 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 			m[k] = append(m[k], v...)
 		}
 		ptest.Internal.Build.ImportPos = m
+		if testEmbed == nil && len(p.Internal.Embed) > 0 {
+			testEmbed = map[string][]string{}
+		}
+		for k, v := range p.Internal.Embed {
+			testEmbed[k] = v
+		}
+		ptest.Internal.Embed = testEmbed
+		ptest.EmbedFiles = str.StringList(p.EmbedFiles, p.TestEmbedFiles)
 		ptest.collectDeps()
 	} else {
 		ptest = p
@@ -186,7 +220,9 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 				GoFiles:    p.XTestGoFiles,
 				Imports:    p.XTestImports,
 				ForTest:    p.ImportPath,
+				Module:     p.Module,
 				Error:      pxtestErr,
+				EmbedFiles: p.XTestEmbedFiles,
 			},
 			Internal: PackageInternal{
 				LocalPrefix: p.Internal.LocalPrefix,
@@ -200,6 +236,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 				Gcflags:    p.Internal.Gcflags,
 				Ldflags:    p.Internal.Ldflags,
 				Gccgoflags: p.Internal.Gccgoflags,
+				Embed:      xtestEmbed,
 			},
 		}
 		if pxtestNeedsPtest {
@@ -217,6 +254,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 			ImportPath: p.ImportPath + ".test",
 			Root:       p.Root,
 			Imports:    str.StringList(TestMainDeps),
+			Module:     p.Module,
 		},
 		Internal: PackageInternal{
 			Build:      &build.Package{Name: "main"},
@@ -239,7 +277,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 		if dep == ptest.ImportPath {
 			pmain.Internal.Imports = append(pmain.Internal.Imports, ptest)
 		} else {
-			p1 := loadImport(pre, dep, "", nil, &stk, nil, 0)
+			p1 := loadImport(ctx, pre, dep, "", nil, &stk, nil, 0)
 			pmain.Internal.Imports = append(pmain.Internal.Imports, p1)
 		}
 	}
@@ -271,7 +309,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 	// afterward that gathers t.Cover information.
 	t, err := loadTestFuncs(ptest)
 	if err != nil && pmain.Error == nil {
-		pmain.Error = &PackageError{Err: err.Error()}
+		pmain.setLoadPackageDataError(err, p.ImportPath, &stk, nil)
 	}
 	t.Cover = cover
 	if len(ptest.GoFiles)+len(ptest.CgoFiles) > 0 {
@@ -322,7 +360,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 
 	data, err := formatTestmain(t)
 	if err != nil && pmain.Error == nil {
-		pmain.Error = &PackageError{Err: err.Error()}
+		pmain.Error = &PackageError{Err: err}
 	}
 	if data != nil {
 		pmain.Internal.TestmainGo = &data
@@ -399,10 +437,13 @@ func recompileForTest(pmain, preal, ptest, pxtest *Package) {
 			}
 		}
 
-		// Don't compile build info from a main package. This can happen
-		// if -coverpkg patterns include main packages, since those packages
-		// are imported by pmain. See golang.org/issue/30907.
-		if p.Internal.BuildInfo != "" && p != pmain {
+		// Force main packages the test imports to be built as libraries.
+		// Normal imports of main packages are forbidden by the package loader,
+		// but this can still happen if -coverpkg patterns include main packages:
+		// covered packages are imported by pmain. Linking multiple packages
+		// compiled with '-p main' causes duplicate symbol errors.
+		// See golang.org/issue/30907, golang.org/issue/34114.
+		if p.Name == "main" && p != pmain && p != ptest {
 			split()
 		}
 	}
@@ -537,7 +578,7 @@ var testFileSet = token.NewFileSet()
 func (t *testFuncs) load(filename, pkg string, doImport, seen *bool) error {
 	f, err := parser.ParseFile(testFileSet, filename, nil, parser.ParseComments)
 	if err != nil {
-		return base.ExpandScanner(err)
+		return err
 	}
 	for _, d := range f.Decls {
 		n, ok := d.(*ast.FuncDecl)
@@ -609,8 +650,9 @@ var testmainTmpl = lazytemplate.New("main", `
 package main
 
 import (
-{{if not .TestMain}}
 	"os"
+{{if .TestMain}}
+	"reflect"
 {{end}}
 	"testing"
 	"testing/internal/testdeps"
@@ -701,6 +743,7 @@ func main() {
 	m := testing.MainStart(testdeps.TestDeps{}, tests, benchmarks, examples)
 {{with .TestMain}}
 	{{.Package}}.{{.Name}}(m)
+	os.Exit(int(reflect.ValueOf(m).Elem().FieldByName("exitCode").Int()))
 {{else}}
 	os.Exit(m.Run())
 {{end}}
