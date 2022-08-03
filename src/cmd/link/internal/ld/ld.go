@@ -32,7 +32,7 @@
 package ld
 
 import (
-	"cmd/internal/goobj2"
+	"cmd/internal/goobj"
 	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
 	"io/ioutil"
@@ -85,24 +85,18 @@ func (ctxt *Link) readImportCfg(file string) {
 				log.Fatalf(`%s:%d: invalid packageshlib: syntax is "packageshlib path=filename"`, file, lineNum)
 			}
 			ctxt.PackageShlib[before] = after
+		case "modinfo":
+			s, err := strconv.Unquote(args)
+			if err != nil {
+				log.Fatalf("%s:%d: invalid modinfo: %v", file, lineNum, err)
+			}
+			addstrdata1(ctxt, "runtime.modinfo="+s)
 		}
 	}
 }
 
 func pkgname(ctxt *Link, lib string) string {
-	name := path.Clean(lib)
-
-	// When using importcfg, we have the final package name.
-	if ctxt.PackageFile != nil {
-		return name
-	}
-
-	// runtime.a -> runtime, runtime.6 -> runtime
-	pkg := name
-	if len(pkg) >= 2 && pkg[len(pkg)-2] == '.' {
-		pkg = pkg[:len(pkg)-2]
-	}
-	return pkg
+	return path.Clean(lib)
 }
 
 func findlib(ctxt *Link, lib string) (string, bool) {
@@ -121,33 +115,24 @@ func findlib(ctxt *Link, lib string) (string, bool) {
 			return "", false
 		}
 	} else {
-		if filepath.IsAbs(name) {
-			pname = name
-		} else {
-			pkg := pkgname(ctxt, lib)
-			// Add .a if needed; the new -importcfg modes
-			// do not put .a into the package name anymore.
-			// This only matters when people try to mix
-			// compiles using -importcfg with links not using -importcfg,
-			// such as when running quick things like
-			// 'go tool compile x.go && go tool link x.o'
-			// by hand against a standard library built using -importcfg.
-			if !strings.HasSuffix(name, ".a") && !strings.HasSuffix(name, ".o") {
-				name += ".a"
-			}
-			// try dot, -L "libdir", and then goroot.
-			for _, dir := range ctxt.Libdir {
-				if ctxt.linkShared {
-					pname = filepath.Join(dir, pkg+".shlibname")
-					if _, err := os.Stat(pname); err == nil {
-						isshlib = true
-						break
-					}
-				}
-				pname = filepath.Join(dir, name)
+		pkg := pkgname(ctxt, lib)
+
+		// search -L "libdir" directories
+		for _, dir := range ctxt.Libdir {
+			if ctxt.linkShared {
+				pname = filepath.Join(dir, pkg+".shlibname")
 				if _, err := os.Stat(pname); err == nil {
+					isshlib = true
 					break
 				}
+			}
+			pname = filepath.Join(dir, name+".a")
+			if _, err := os.Stat(pname); err == nil {
+				break
+			}
+			pname = filepath.Join(dir, name+".o")
+			if _, err := os.Stat(pname); err == nil {
+				break
 			}
 		}
 		pname = filepath.Clean(pname)
@@ -156,7 +141,7 @@ func findlib(ctxt *Link, lib string) (string, bool) {
 	return pname, isshlib
 }
 
-func addlib(ctxt *Link, src, obj, lib string, fingerprint goobj2.FingerprintType) *sym.Library {
+func addlib(ctxt *Link, src, obj, lib string, fingerprint goobj.FingerprintType) *sym.Library {
 	pkg := pkgname(ctxt, lib)
 
 	// already loaded?
@@ -192,7 +177,7 @@ func addlib(ctxt *Link, src, obj, lib string, fingerprint goobj2.FingerprintType
  *	fingerprint: if not 0, expected fingerprint for import from srcref
  *	             fingerprint is 0 if the library is not imported (e.g. main)
  */
-func addlibpath(ctxt *Link, srcref, objref, file, pkg, shlib string, fingerprint goobj2.FingerprintType) *sym.Library {
+func addlibpath(ctxt *Link, srcref, objref, file, pkg, shlib string, fingerprint goobj.FingerprintType) *sym.Library {
 	if l := ctxt.LibraryByPkg[pkg]; l != nil {
 		return l
 	}
@@ -253,11 +238,11 @@ func PrepareAddmoduledata(ctxt *Link) (*loader.SymbolBuilder, loader.Sym) {
 	ctxt.loader.SetAttrLocal(ifs, true)
 	initfunc.SetType(sym.STEXT)
 
-	// Add the init func and/or addmoduledata to Textp2.
+	// Add the init func and/or addmoduledata to Textp.
 	if ctxt.BuildMode == BuildModePlugin {
-		ctxt.Textp2 = append(ctxt.Textp2, amd)
+		ctxt.Textp = append(ctxt.Textp, amd)
 	}
-	ctxt.Textp2 = append(ctxt.Textp2, initfunc.Sym())
+	ctxt.Textp = append(ctxt.Textp, initfunc.Sym())
 
 	// Create an init array entry
 	amdi := ctxt.loader.LookupOrCreateSym("go.link.addmoduledatainit", 0)

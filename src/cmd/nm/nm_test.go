@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"internal/obscuretestdata"
 	"internal/testenv"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +30,7 @@ func testMain(m *testing.M) int {
 		return 0
 	}
 
-	tmpDir, err := ioutil.TempDir("", "TestNM")
+	tmpDir, err := os.MkdirTemp("", "TestNM")
 	if err != nil {
 		fmt.Println("TempDir failed:", err)
 		return 2
@@ -67,7 +66,7 @@ func TestNonGoExecs(t *testing.T) {
 		"internal/xcoff/testdata/gcc-ppc64-aix-dwarf2-exec",
 	}
 	for _, f := range testfiles {
-		exepath := filepath.Join(runtime.GOROOT(), "src", f)
+		exepath := filepath.Join(testenv.GOROOT(t), "src", f)
 		if strings.HasSuffix(f, ".base64") {
 			tf, err := obscuretestdata.DecodeToTempFile(exepath)
 			if err != nil {
@@ -88,7 +87,7 @@ func TestNonGoExecs(t *testing.T) {
 
 func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir("", "TestGoExec")
+	tmpdir, err := os.MkdirTemp("", "TestGoExec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +172,9 @@ func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 		if runtime.GOOS == "windows" {
 			return true
 		}
+		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+			return true // On darwin/arm64 everything is PIE
+		}
 		return false
 	}
 
@@ -219,7 +221,7 @@ func TestGoExec(t *testing.T) {
 
 func testGoLib(t *testing.T, iscgo bool) {
 	t.Parallel()
-	tmpdir, err := ioutil.TempDir("", "TestGoLib")
+	tmpdir, err := os.MkdirTemp("", "TestGoLib")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,29 +244,20 @@ func testGoLib(t *testing.T, iscgo bool) {
 		err = e
 	}
 	if err == nil {
-		err = ioutil.WriteFile(filepath.Join(libpath, "go.mod"), []byte("module mylib\n"), 0666)
+		err = os.WriteFile(filepath.Join(libpath, "go.mod"), []byte("module mylib\n"), 0666)
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	args := []string{"install", "mylib"}
-	cmd := exec.Command(testenv.GoToolPath(t), args...)
+	cmd := exec.Command(testenv.GoToolPath(t), "build", "-buildmode=archive", "-o", "mylib.a", ".")
 	cmd.Dir = libpath
 	cmd.Env = append(os.Environ(), "GOPATH="+gopath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("building test lib failed: %s %s", err, out)
 	}
-	pat := filepath.Join(gopath, "pkg", "*", "mylib.a")
-	ms, err := filepath.Glob(pat)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ms) == 0 {
-		t.Fatalf("cannot found paths for pattern %s", pat)
-	}
-	mylib := ms[0]
+	mylib := filepath.Join(libpath, "mylib.a")
 
 	out, err = exec.Command(testnmpath, mylib).CombinedOutput()
 	if err != nil {
@@ -283,7 +276,7 @@ func testGoLib(t *testing.T, iscgo bool) {
 	if iscgo {
 		syms = append(syms, symType{"B", "mylib.TestCgodata", false, false})
 		syms = append(syms, symType{"T", "mylib.TestCgofunc", false, false})
-		if runtime.GOOS == "darwin" || (runtime.GOOS == "windows" && runtime.GOARCH == "386") {
+		if runtime.GOOS == "darwin" || runtime.GOOS == "ios" || (runtime.GOOS == "windows" && runtime.GOARCH == "386") {
 			syms = append(syms, symType{"D", "_cgodata", true, false})
 			syms = append(syms, symType{"T", "_cgofunc", true, false})
 		} else if runtime.GOOS == "aix" {

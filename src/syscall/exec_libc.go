@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build aix solaris
+//go:build aix || solaris
 
 // This file handles forkAndExecInChild function for OS using libc syscall like AIX or Solaris.
 
 package syscall
 
 import (
+	"runtime"
 	"unsafe"
 )
 
@@ -74,6 +75,7 @@ func init() {
 // because we need to avoid lazy-loading the functions (might malloc,
 // split the stack, or acquire mutexes). We can't call RawSyscall
 // because it's not safe even for BSD-subsystem calls.
+//
 //go:norace
 func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr *ProcAttr, sys *SysProcAttr, pipe int) (pid int, err Errno) {
 	// Declare all variables at top in case any
@@ -115,8 +117,6 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 
 	// Fork succeeded, now in child.
 
-	runtime_AfterForkInChild()
-
 	// Session ID
 	if sys.Setsid {
 		_, err1 = setsid()
@@ -151,6 +151,10 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 			goto childerror
 		}
 	}
+
+	// Restore the signal mask. We do this after TIOCSPGRP to avoid
+	// having the kernel send a SIGTTOU signal to the process group.
+	runtime_AfterForkInChild()
 
 	// Chroot
 	if chroot != nil {
@@ -194,11 +198,19 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 	// Pass 1: look for fd[i] < i and move those up above len(fd)
 	// so that pass 2 won't stomp on an fd it needs later.
 	if pipe < nextfd {
-		_, err1 = dup2child(uintptr(pipe), uintptr(nextfd))
+		switch runtime.GOOS {
+		case "illumos":
+			_, err1 = fcntl1(uintptr(pipe), _F_DUP2FD_CLOEXEC, uintptr(nextfd))
+		default:
+			_, err1 = dup2child(uintptr(pipe), uintptr(nextfd))
+			if err1 != 0 {
+				goto childerror
+			}
+			_, err1 = fcntl1(uintptr(nextfd), F_SETFD, FD_CLOEXEC)
+		}
 		if err1 != 0 {
 			goto childerror
 		}
-		fcntl1(uintptr(nextfd), F_SETFD, FD_CLOEXEC)
 		pipe = nextfd
 		nextfd++
 	}
@@ -207,11 +219,16 @@ func forkAndExecInChild(argv0 *byte, argv, envv []*byte, chroot, dir *byte, attr
 			if nextfd == pipe { // don't stomp on pipe
 				nextfd++
 			}
-			_, err1 = dup2child(uintptr(fd[i]), uintptr(nextfd))
-			if err1 != 0 {
-				goto childerror
+			switch runtime.GOOS {
+			case "illumos":
+				_, err1 = fcntl1(uintptr(fd[i]), _F_DUP2FD_CLOEXEC, uintptr(nextfd))
+			default:
+				_, err1 = dup2child(uintptr(fd[i]), uintptr(nextfd))
+				if err1 != 0 {
+					goto childerror
+				}
+				_, err1 = fcntl1(uintptr(nextfd), F_SETFD, FD_CLOEXEC)
 			}
-			_, err1 = fcntl1(uintptr(nextfd), F_SETFD, FD_CLOEXEC)
 			if err1 != 0 {
 				goto childerror
 			}
