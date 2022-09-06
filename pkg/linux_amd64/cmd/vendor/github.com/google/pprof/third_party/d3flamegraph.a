@@ -1,7 +1,7 @@
 !<arch>
-__.PKGDEF       0           0     0     644     72078     `
-go object linux amd64 go1.19 X:regabiwrappers,regabiargs
-build id "q3E7331LyRxiiMllgr2L/gmQRvaBMis7UqC9Svauf"
+__.PKGDEF       0           0     0     644     72080     `
+go object linux amd64 go1.19.1 X:regabiwrappers,regabiargs
+build id "ngChvKFy_ue3XiYUKRWx/UvkzjtcWNu1_efGC53Rc"
 
 
 $$B
@@ -57,9 +57,9 @@ iæ±Y$GOROOT/src/cmd/vendor/github.com/google/pprof/third_party/d3flamegraph/d
 }
  d3flamegraph	CSSSourceJSSourceC2 ZCJ °«Å±Æ± Ó±Ý±  –-¢àçWtv
 $$
-_go_.o          0           0     0     644     609       `
-go object linux amd64 go1.19 X:regabiwrappers,regabiargs
-build id "q3E7331LyRxiiMllgr2L/gmQRvaBMis7UqC9Svauf"
+_go_.o          0           0     0     644     611       `
+go object linux amd64 go1.19.1 X:regabiwrappers,regabiargs
+build id "ngChvKFy_ue3XiYUKRWx/UvkzjtcWNu1_efGC53Rc"
 
 
 !

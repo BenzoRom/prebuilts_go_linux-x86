@@ -1,7 +1,7 @@
 !<arch>
-__.PKGDEF       0           0     0     644     8178      `
-go object linux amd64 go1.19 X:regabiwrappers,regabiargs
-build id "wPo7b6V4dUjpUJzSjWe6/_OcZp-SnbXR9acMNiQZM"
+__.PKGDEF       0           0     0     644     8180      `
+go object linux amd64 go1.19.1 X:regabiwrappers,regabiargs
+build id "0yLRg1O4EhQUKP5wbgTN/mJCgtM0ANsQUacd3gEZA"
 
 
 $$B
@@ -295,9 +295,9 @@ function handleMouseUp(evt) {
 }
  svgpanJSSourceC& LÊ>Ë> Ò>  ßÊ77×ˆ
 $$
-_go_.o          0           0     0     644     577       `
-go object linux amd64 go1.19 X:regabiwrappers,regabiargs
-build id "wPo7b6V4dUjpUJzSjWe6/_OcZp-SnbXR9acMNiQZM"
+_go_.o          0           0     0     644     579       `
+go object linux amd64 go1.19.1 X:regabiwrappers,regabiargs
+build id "0yLRg1O4EhQUKP5wbgTN/mJCgtM0ANsQUacd3gEZA"
 
 
 !
